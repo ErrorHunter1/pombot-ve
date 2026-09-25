@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import runtime, scheduler, tasks
+from . import heartbeat, runtime, scheduler, tasks
 from .config import settings
 from .db import SessionLocal, migrate
 from .routers import admin, auth, extras, guests, nodes, pools, system, users
@@ -29,9 +29,11 @@ async def lifespan(_: FastAPI):
     tasks.mark_stale_tasks()
     poller = asyncio.create_task(tasks.poll_loop())
     backups = asyncio.create_task(scheduler.scheduler_loop())
+    health = asyncio.create_task(heartbeat.heartbeat_loop())
     yield
     poller.cancel()
     backups.cancel()
+    health.cancel()
 
 
 app = FastAPI(title="PomBot Panel", version=settings.version, lifespan=lifespan,

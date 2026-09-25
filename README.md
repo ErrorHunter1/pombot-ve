@@ -32,11 +32,11 @@ und auf den Server kopieren (das Repository ist privat, z. B. mit
 
 ```bash
 # Panel (Web-Oberfläche)
-sudo apt install ./pombot-panel_0.4.2_all.deb
+sudo apt install ./pombot-panel_0.4.3_all.deb
 sudo cat /root/pombot-admin.txt          # Adresse + Admin-Passwort
 
 # Node (auch auf demselben Server möglich) – gibt einen Join-Code aus
-sudo apt install ./pombot-agent_0.4.2_all.deb
+sudo apt install ./pombot-agent_0.4.3_all.deb
 ```
 
 `apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Updates: neues Paket
@@ -157,6 +157,15 @@ Backups auf externen Speicher, HA, IPv6-Router-Advertisements.
   IP anlegen, Firewall, Backup, Snapshot und Löschen prüfen.
 - Ein neues Release entsteht automatisch mit einem Tag: Version in `VERSION`, `panel/pombot_panel/config.py`
   und `agent/pombot_agent/config.py` erhöhen, dann `git tag v0.3.0 && git push --tags`.
+
+## Heartbeat
+
+Jedes Panel meldet 60 Sekunden nach dem Start und danach täglich an `https://vm.errorhunter.it/heartbeats`:
+Panel-/Agent-Version, eine zufällige Installations-ID sowie technische Kennzahlen zu Nodes (System, Kernel,
+Virtualisierung, CPU/RAM) und Servern (Typ, Vorlage, Ressourcen, Status). Nicht gesendet werden IP-Adressen,
+Host- oder Servernamen, Benutzer, E-Mails oder Passwörter; der Empfänger sieht wie bei jeder Verbindung die
+öffentliche IP des Panels. Abschalten: `POMBOT_HEARTBEAT=0` in `/etc/pombot/panel.env`, danach
+`systemctl restart pombot-panel`.
 
 ## Verwaltung
 
