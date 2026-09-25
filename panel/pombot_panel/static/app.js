@@ -2024,7 +2024,7 @@ async function settingsDomain(head) {
     <div class="card"><div class="card-head"><h2>Aktuell</h2></div><div class="card-body"><dl class="kv">
       <dt>Adresse</dt><dd><a href="${esc(d.base_url)}">${esc(d.base_url)}</a></dd>
       <dt>Port</dt><dd>${d.port}</dd>
-      <dt>Zertifikat</dt><dd>${d.acme_enabled && c ? `${badge(c.days_left > 14 ? "Let's Encrypt" : "läuft bald ab", c.days_left > 14 ? "good" : "warn")}<div class="small muted">${esc(c.domains.join(", "))} · gültig bis ${fmtDate(c.not_after)} (${c.days_left} Tage) · wird automatisch verlängert</div>`
+      <dt>Zertifikat</dt><dd>${c && /Let's Encrypt/i.test(c.issuer) ? `${badge(c.days_left > 14 ? "Let's Encrypt" : "läuft bald ab", c.days_left > 14 ? "good" : "warn")}<div class="small muted">${esc(c.domains.join(", "))} · gültig bis ${fmtDate(c.not_after)} (${c.days_left} Tage) · wird automatisch verlängert</div>`
         : badge("Selbstsigniert (Browser-Warnung)", "warn")}</dd>
       <dt>Öffentliche IP</dt><dd class="mono">${esc(d.public_ip || "–")}</dd></dl>
       ${d.acme_enabled ? `<button class="btn danger" style="margin-top:14px" data-act="domainReset">Domain entfernen</button>` : ""}</div></div>

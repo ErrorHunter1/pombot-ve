@@ -32,7 +32,9 @@ curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh 
 ```
 
 Das installiert die neueste Version: **Panel und Node auf demselben Server**, fertig miteinander
-verbunden. Am Ende stehen die Adresse des Panels und das Admin-Passwort im Terminal (zusätzlich in
+verbunden. Der Installer fragt, ob das Panel unter einer **eigenen Domain** laufen soll – dann holt er
+per certbot ein Let's-Encrypt-Zertifikat (Domain muss per DNS auf den Server zeigen, Port 80 kurz frei sein)
+und stellt das Panel auf `https://deine-domain` um; die Erneuerung läuft automatisch. Am Ende stehen die Adresse des Panels und das Admin-Passwort im Terminal (zusätzlich in
 `/root/pombot-admin.txt`). Die Adresse im Browser mit **https** und Port öffnen, z. B.
 `https://203.0.113.10:8443`, und die Zertifikatswarnung einmal bestätigen.
 
@@ -44,6 +46,9 @@ curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh 
 
 # nur einen weiteren Node – gibt einen Join-Code fürs Panel aus
 curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash -s -- --node
+
+# ohne Rückfrage mit Domain (z. B. für Automatisierung)
+curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash -s -- --domain panel.example.de --email du@example.de
 
 # bestimmte Version
 curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash -s -- --version v0.4.3
