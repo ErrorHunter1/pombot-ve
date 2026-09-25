@@ -125,8 +125,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nfs-kernel-server sam
 sudo useradd -m -s /bin/bash pbbackup && echo 'pbbackup:SftpTest12345' | sudo chpasswd
 printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/00-pbtest.conf >/dev/null
 sudo systemctl restart ssh || sudo systemctl start ssh
-# S3: MinIO im Docker-Container
-docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=pbminio -e MINIO_ROOT_PASSWORD=pbminio12345 minio/minio server /data >/dev/null
+# S3: moto als S3-kompatibler Testserver (verhält sich wie AWS S3)
+python3 -m venv /tmp/s3venv && /tmp/s3venv/bin/pip install -q "moto[server]"
+nohup /tmp/s3venv/bin/moto_server -H 127.0.0.1 -p 9000 >/tmp/moto.log 2>&1 &
 # NFS
 sudo mkdir -p /srv/nfsbackup
 echo "/srv/nfsbackup 127.0.0.1(rw,sync,no_root_squash,no_subtree_check)" | sudo tee -a /etc/exports >/dev/null
@@ -137,7 +138,7 @@ sudo useradd -M pbsmb && sudo mkdir -p /srv/smbbackup && sudo chown pbsmb /srv/s
 printf '[pbbackup]\n  path = /srv/smbbackup\n  writable = yes\n  valid users = pbsmb\n' | sudo tee -a /etc/samba/smb.conf >/dev/null
 sudo systemctl restart smbd
 sleep 5
-RCLONE_CONFIG_M_TYPE=s3 RCLONE_CONFIG_M_PROVIDER=Minio RCLONE_CONFIG_M_ENDPOINT=http://127.0.0.1:9000 \
+RCLONE_CONFIG_M_TYPE=s3 RCLONE_CONFIG_M_PROVIDER=Other RCLONE_CONFIG_M_ENDPOINT=http://127.0.0.1:9000 \
   RCLONE_CONFIG_M_ACCESS_KEY_ID=pbminio RCLONE_CONFIG_M_SECRET_ACCESS_KEY=pbminio12345 rclone mkdir m:pombot-ci
 end
 
@@ -145,7 +146,7 @@ for KIND in sftp s3 nfs smb; do
   step "Backup auf $KIND: Test, Sichern, Liste, Wiederherstellen, Löschen"
   case "$KIND" in
     sftp) CFG='{"host":"127.0.0.1","port":22,"user":"pbbackup","password":"SftpTest12345","path":"backups"}' ;;
-    s3)   CFG='{"provider":"Minio","endpoint":"http://127.0.0.1:9000","region":"us-east-1","bucket":"pombot-ci","access_key":"pbminio","secret_key":"pbminio12345","path":"pb"}' ;;
+    s3)   CFG='{"provider":"Other","endpoint":"http://127.0.0.1:9000","region":"us-east-1","bucket":"pombot-ci","access_key":"pbminio","secret_key":"pbminio12345","path":"pb"}' ;;
     nfs)  CFG='{"server":"127.0.0.1","export":"/srv/nfsbackup","options":"vers=4,soft","path":"pb"}' ;;
     smb)  CFG='{"share":"//127.0.0.1/pbbackup","user":"pbsmb","password":"SmbTest12345","version":"3.0","path":"pb"}' ;;
   esac
