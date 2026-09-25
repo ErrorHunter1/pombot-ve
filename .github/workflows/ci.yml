@@ -49,6 +49,27 @@ jobs:
           sudo journalctl -u pombot-panel -u pombot-agent --no-pager -n 200 || true
           sudo nft list ruleset || true
 
+  oneclick:
+    # One-Click-Installer auf frischem Server (installiert das neueste veröffentlichte Release)
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: get.sh ausführen
+        run: sudo bash get.sh
+      - name: Panel und Node prüfen
+        run: |
+          systemctl is-active pombot-panel pombot-agent
+          PW="$(sudo sed -n 's/^Admin angelegt: admin \/ //p' /root/pombot-admin.txt)"
+          test -n "$PW"
+          curl -sk -c jar -H "X-PomBot: 1" -H "Content-Type: application/json"             -d "{\"username\":\"admin\",\"password\":\"$PW\"}" https://127.0.0.1:8443/api/auth/login | grep -q '"ok":true'
+          curl -sk -b jar https://127.0.0.1:8443/api/nodes | tee /dev/stderr | grep -q '"status":"online"'
+      - name: Zweiter Lauf (Update) darf nichts kaputt machen
+        run: |
+          sudo bash get.sh
+          systemctl is-active pombot-panel pombot-agent
+
   kvm-matrix:
     # Vergleicht VM-Einstellungen bei verschachtelter Virtualisierung – nur bei manuellem Start
     if: github.event_name == 'workflow_dispatch'

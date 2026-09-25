@@ -19,42 +19,67 @@ Läuft auf **Debian 12/13** und **Ubuntu 22.04/24.04**.
 |---|---|
 | `panel/` | Web-Oberfläche und API (läuft als Benutzer `pombot`) |
 | `agent/` | Dienst auf jedem Virtualisierungs-Host (läuft als root, Port 8007) |
-| `install.sh` | Installer für das Panel (optional gleich mit Agent) |
+| `get.sh` | One-Click-Installer (lädt die neueste Version aus den Releases) |
+| `install.sh` | Installer aus dem Quellcode (Panel, optional gleich mit Agent) |
 | `agent/install-agent.sh` | Installer für einen Node (wird vom Panel automatisch per SSH ausgeführt) |
 
-## Installation
+## Installation (One-Click)
 
-### Variante A: Pakete (empfohlen)
-
-Die `.deb`-Dateien aus dem neuesten [Release](https://github.com/ErrorHunter1/pombot-ve/releases) laden
-und auf den Server kopieren (das Repository ist privat, z. B. mit
-`gh release download --repo ErrorHunter1/pombot-ve --pattern '*.deb'`):
+Auf einem frischen Server mit **Debian 12/13** oder **Ubuntu 22.04/24.04** als root ausführen:
 
 ```bash
-# Panel (Web-Oberfläche)
-sudo apt install ./pombot-panel_0.4.3_all.deb
-sudo cat /root/pombot-admin.txt          # Adresse + Admin-Passwort
-
-# Node (auch auf demselben Server möglich) – gibt einen Join-Code aus
-sudo apt install ./pombot-agent_0.4.3_all.deb
+curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash
 ```
 
-`apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Updates: neues Paket
-genauso installieren, Konfiguration und Daten bleiben erhalten. Selbst bauen: `bash packaging/build-deb.sh`.
+Das installiert die neueste Version: **Panel und Node auf demselben Server**, fertig miteinander
+verbunden. Am Ende stehen die Adresse des Panels und das Admin-Passwort im Terminal (zusätzlich in
+`/root/pombot-admin.txt`). Die Adresse im Browser mit **https** und Port öffnen, z. B.
+`https://203.0.113.10:8443`, und die Zertifikatswarnung einmal bestätigen.
 
-### Variante B: aus dem Quellcode
-
-Projekt auf den Server kopieren, dann als root:
+Varianten:
 
 ```bash
-# Panel + diesen Server gleich als ersten Node einrichten
-sudo bash install.sh --with-agent
+# nur das Panel (z. B. in einem LXC-Container oder auf einem kleinen VPS)
+curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash -s -- --panel
 
-# nur das Panel (Nodes werden später über die GUI hinzugefügt)
-sudo bash install.sh --url https://panel.example.com:8443
+# nur einen weiteren Node – gibt einen Join-Code fürs Panel aus
+curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash -s -- --node
+
+# bestimmte Version
+curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh | sudo bash -s -- --version v0.4.3
 ```
 
-Am Ende werden die Panel-Adresse und das Admin-Passwort ausgegeben.
+Nodes brauchen einen echten Server oder eine VM mit (verschachtelter) Virtualisierung – in einem
+Container installiert der Installer automatisch nur das Panel.
+
+**Update:** denselben Befehl erneut ausführen. Einstellungen, Server und Daten bleiben erhalten.
+
+**Firewall:** Panel-Port `8443/tcp` öffnen (bzw. `443` mit eigener Domain). Nodes brauchen Port
+`8007/tcp` nur für die IP des Panels.
+
+### Manuelle Installation
+
+<details>
+<summary>Pakete von Hand oder aus dem Quellcode installieren</summary>
+
+Die `.deb`-Dateien aus dem neuesten [Release](https://github.com/ErrorHunter1/pombot-ve/releases) laden:
+
+```bash
+sudo apt install ./pombot-panel_*_all.deb      # Panel – Zugangsdaten danach in /root/pombot-admin.txt
+sudo apt install ./pombot-agent_*_all.deb      # Node – gibt einen Join-Code aus
+```
+
+`apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Selbst bauen:
+`bash packaging/build-deb.sh`.
+
+Aus dem Quellcode (Repository klonen, dann als root):
+
+```bash
+sudo bash install.sh --with-agent                         # Panel + dieser Server als Node
+sudo bash install.sh --url https://panel.example.com:8443  # nur Panel
+```
+
+</details>
 
 ### Weitere Nodes hinzufügen
 
