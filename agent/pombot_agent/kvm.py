@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-from . import cloudinit, images
+from . import cloudinit, images, isos
 from .config import BACKUP_DIR, GUEST_DIR, KVM_CPU, KVM_SERIAL
 from .util import CmdError, check_name, check_snap, ok, run
 
@@ -162,8 +162,9 @@ def create(job, spec: dict) -> dict:
     disk = d / "disk.qcow2"
     size_gb = int(spec["disk_gb"])
     try:
-        if spec.get("iso_url"):
-            cdrom = images.ensure_iso(spec["iso_url"], job)
+        if spec.get("iso_url") or spec.get("iso_file"):
+            cdrom = isos.iso_path(spec["iso_file"]) if spec.get("iso_file") else images.ensure_iso(spec["iso_url"], job)
+            job.write(f"Installationsmedium: {cdrom.name}")
             job.write(f"Erstelle leere Festplatte ({size_gb} GB) …")
             run(["qemu-img", "create", "-f", "qcow2", disk, f"{size_gb}G"], job=job)
         else:
@@ -350,6 +351,77 @@ def set_network(job, name: str, spec: dict) -> dict:
     if was_running:
         run(["virsh", "start", name], job=job)
     return {"state": state(name)}
+
+
+def _cdroms(root: ET.Element) -> list[ET.Element]:
+    return root.findall("./devices/disk[@device='cdrom']")
+
+
+def _is_seed(disk: ET.Element) -> bool:
+    src = disk.find("source")
+    return src is not None and (src.get("file") or "").endswith("seed.iso")
+
+
+def cdrom_info(name: str) -> dict:
+    root = _xml(name, inactive=True)
+    drives = []
+    for disk in _cdroms(root):
+        src = disk.find("source")
+        path = src.get("file") if src is not None else None
+        drives.append({"target": disk.find("target").get("dev"), "file": Path(path).name if path else None,
+                       "seed": _is_seed(disk)})
+    boots = [b.get("dev") for b in root.findall("./os/boot")]
+    return {"drives": drives, "boot_cdrom": bool(boots) and boots[0] == "cdrom"}
+
+
+def set_cdrom(name: str, iso_file: str | None, boot_cdrom: bool) -> dict:
+    """Legt eine ISO in das CD-Laufwerk ein (oder wirft sie aus) und setzt die Startreihenfolge.
+    Der cloud-init-Datenträger (seed.iso) bleibt unangetastet; für eigene ISOs gibt es ein zweites Laufwerk."""
+    running = state(name) in ("running", "paused")
+    live_boot_cdrom = running and [b.get("dev") for b in _xml(name).findall("./os/boot")][:1] == ["cdrom"]
+    root = _xml(name, inactive=True)
+    devices = root.find("devices")
+    media = next((d for d in _cdroms(root) if not _is_seed(d)), None)
+    path = str(isos.iso_path(iso_file)) if iso_file else None
+    added = False
+    if media is None and path:
+        used = {d.find("target").get("dev") for d in root.findall("./devices/disk")}
+        dev = next(f"sd{c}" for c in "bcdefgh" if f"sd{c}" not in used)
+        media = ET.SubElement(devices, "disk", {"type": "file", "device": "cdrom", "snapshot": "no"})
+        ET.SubElement(media, "driver", {"name": "qemu", "type": "raw"})
+        ET.SubElement(media, "target", {"dev": dev, "bus": "sata"})
+        ET.SubElement(media, "readonly")
+        added = True
+    if media is not None:
+        src = media.find("source")
+        if path:
+            if src is None:
+                src = ET.Element("source")
+                media.insert(1, src)
+            src.set("file", path)
+        elif src is not None:
+            media.remove(src)
+    os_el = root.find("os")
+    for b in os_el.findall("boot"):
+        os_el.remove(b)
+    order = ["cdrom", "hd"] if boot_cdrom else ["hd", "cdrom"]
+    insert_at = list(os_el).index(os_el.find("type")) + 1
+    for i, dev in enumerate(order):
+        os_el.insert(insert_at + i, ET.Element("boot", {"dev": dev}))
+    xml_path = _guest_dir(name) / "domain.xml"
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    xml_path.write_text(ET.tostring(root, encoding="unicode"))
+    run(["virsh", "define", xml_path])
+    restart_needed = False
+    if running:
+        if added:
+            restart_needed = True  # neues Laufwerk erst nach Stoppen/Starten vorhanden
+        elif media is not None:
+            target = media.find("target").get("dev")
+            action = ["--insert", path, "--force"] if path else ["--eject", "--force"]
+            restart_needed = not ok(["virsh", "change-media", name, target, "--live", *action])
+        restart_needed = restart_needed or live_boot_cdrom != boot_cdrom
+    return {**cdrom_info(name), "restart_needed": restart_needed}
 
 
 def set_password(name: str, user: str, password: str) -> None:

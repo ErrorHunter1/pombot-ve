@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, host, images, kvm, lxc, routed
+from . import console, firewall, host, images, isos, kvm, lxc, routed
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -150,6 +150,7 @@ class CreateSpec(BaseModel):
     iso_url: str | None = None
     lxc_dist: str | None = None
     lxc_release: str | None = None
+    iso_file: str | None = None  # ISO aus der Bibliothek des Nodes
     instance_suffix: str = "1"
     routed: bool = False  # Zusatz-IPs über pbr0 routen statt direkt bridgen
 
@@ -174,8 +175,10 @@ def guest_create(spec: CreateSpec):
         ipaddress.ip_address(server)
     data = spec.model_dump()
     data["ips"] = [ip.model_dump() for ip in spec.ips]
-    if spec.type == "kvm" and not (spec.image_url or spec.iso_url):
-        raise HTTPException(400, "image_url oder iso_url erforderlich")
+    if spec.type == "kvm" and not (spec.image_url or spec.iso_url or spec.iso_file):
+        raise HTTPException(400, "image_url, iso_url oder iso_file erforderlich")
+    if spec.iso_file:
+        isos.iso_path(spec.iso_file)
     if spec.type == "lxc" and not (spec.lxc_dist and spec.lxc_release):
         raise HTTPException(400, "lxc_dist und lxc_release erforderlich")
     if spec.routed and spec.bridge != routed.BRIDGE:
@@ -367,6 +370,91 @@ def firewall_put(name: str, cfg: dict):
 def firewall_delete(name: str):
     firewall.remove(check_name(name))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- ISO-Bibliothek
+
+@app.get("/isos", dependencies=[Depends(auth)])
+def iso_list():
+    return isos.list_isos()
+
+
+@app.delete("/isos/{name}", dependencies=[Depends(auth)])
+def iso_delete(name: str):
+    isos.delete(name)
+    return {"ok": True}
+
+
+@app.post("/isos/uploads", dependencies=[Depends(auth)])
+def iso_upload_start():
+    return {"upload_id": isos.upload_start()}
+
+
+@app.get("/isos/uploads/{upload_id}", dependencies=[Depends(auth)])
+def iso_upload_status(upload_id: str):
+    return {"offset": isos.upload_offset(upload_id)}
+
+
+@app.put("/isos/uploads/{upload_id}", dependencies=[Depends(auth)])
+async def iso_upload_chunk(upload_id: str, request: Request, offset: int = 0):
+    """Ein Stück der Datei anhängen. Der Offset muss dem bisherigen Stand entsprechen (Wiederaufnahme möglich)."""
+    fh = isos.open_chunk(upload_id, offset)
+    try:
+        async for chunk in request.stream():
+            if chunk:
+                await asyncio.to_thread(fh.write, chunk)
+    finally:
+        fh.close()
+    return {"offset": isos.upload_offset(upload_id)}
+
+
+class FinishBody(BaseModel):
+    name: str
+    size: int | None = None
+
+
+@app.post("/isos/uploads/{upload_id}/finish", dependencies=[Depends(auth)])
+def iso_upload_finish(upload_id: str, body: FinishBody):
+    return isos.upload_finish(upload_id, body.name, body.size)
+
+
+@app.delete("/isos/uploads/{upload_id}", dependencies=[Depends(auth)])
+def iso_upload_abort(upload_id: str):
+    isos.upload_abort(upload_id)
+    return {"ok": True}
+
+
+class FetchBody(BaseModel):
+    url: str = Field(pattern=r"^https?://")
+    name: str
+
+
+@app.post("/isos/fetch", dependencies=[Depends(auth)])
+def iso_fetch(body: FetchBody):
+    name = isos.check_name(body.name)
+    return job_response(start_job("iso-fetch", None, isos.fetch, body.url, name))
+
+
+# ---------------------------------------------------------------- CD-Laufwerk (KVM)
+
+class CdromBody(BaseModel):
+    iso_file: str | None = None
+    boot_cdrom: bool = False
+
+
+@app.get("/guests/{name}/cdrom", dependencies=[Depends(auth)])
+def cdrom_get(name: str):
+    if module_for(name) is not kvm:
+        raise HTTPException(400, "Nur VMs haben ein CD-Laufwerk")
+    return kvm.cdrom_info(name)
+
+
+@app.post("/guests/{name}/cdrom", dependencies=[Depends(auth)])
+def cdrom_set(name: str, body: CdromBody):
+    if module_for(name) is not kvm:
+        raise HTTPException(400, "Nur VMs haben ein CD-Laufwerk")
+    with try_lock(name):
+        return kvm.set_cdrom(name, body.iso_file, body.boot_cdrom)
 
 
 # ---------------------------------------------------------------- Images

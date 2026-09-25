@@ -166,6 +166,33 @@ else
 fi
 end
 
+step "ISO-Bibliothek: Upload in Stücken, VM aus ISO, CD-Laufwerk"
+mkdir -p /tmp/isosrc && echo "PomBot CI" > /tmp/isosrc/readme.txt && head -c 40M /dev/urandom > /tmp/isosrc/fill.bin
+xorriso -as mkisofs -quiet -o /tmp/ci-test.iso -V CITEST /tmp/isosrc
+SIZE=$(stat -c %s /tmp/ci-test.iso)
+UP="$(api POST "/api/nodes/$(api GET /api/nodes | json 'd[0]["id"]')/isos/uploads" | json 'd["upload_id"]')"
+NID="$(api GET /api/nodes | json 'd[0]["id"]')"
+OFF=0; CHUNK=$((16 * 1024 * 1024))
+while [ "$OFF" -lt "$SIZE" ]; do
+  OFF="$(tail -c +$((OFF + 1)) /tmp/ci-test.iso | head -c "$CHUNK" | curl -sk -b "$JAR" -X PUT -H "X-PomBot: 1" -H "Content-Type: application/octet-stream" \
+        --data-binary @- "$API/api/nodes/$NID/isos/uploads/$UP?offset=$OFF" | json 'd["offset"]')"
+  echo "hochgeladen: $OFF / $SIZE"
+done
+api POST "/api/nodes/$NID/isos/uploads/$UP/finish" "{\"name\":\"ci-test.iso\",\"size\":$SIZE}" | tee /dev/stderr | grep -q '"file":"ci-test.iso"' || fail "ISO-Upload fehlgeschlagen"
+test -f /var/lib/pombot/iso/ci-test.iso || fail "ISO liegt nicht auf dem Node"
+RES="$(api POST /api/guests "{\"iso_file\":\"ci-test.iso\",\"node\":$NID,\"name\":\"ci-iso\",\"hostname\":\"ci-iso\",\"cores\":1,\"memory_mb\":512,\"disk_gb\":5,\"ipv4_pool\":\"none\"}")"
+echo "$RES"
+IGID="$(echo "$RES" | json 'd["guest_id"]')"; IVMID="$(echo "$RES" | json 'd["vmid"]')"
+wait_task "$(echo "$RES" | json 'd["task_id"]')" 300
+sudo virsh dumpxml "pv$IVMID" | grep -q "ci-test.iso" || fail "ISO nicht als Laufwerk eingebunden"
+api POST "/api/guests/$IGID/cdrom" '{"iso_file":"ci-test.iso","boot_cdrom":true}' | tee /dev/stderr | grep -q '"boot_cdrom":true' || fail "CD-Laufwerk nicht gesetzt"
+sudo virsh dumpxml --inactive "pv$IVMID" | grep -A1 "<type" | tee /dev/stderr
+sudo virsh dumpxml --inactive "pv$IVMID" | grep -m1 "<boot dev=" | grep -q cdrom || fail "Start von CD nicht als erstes eingestellt"
+api POST "/api/guests/$IGID/cdrom" '{"iso_file":null,"boot_cdrom":false}' | grep -q '"boot_cdrom":false' || fail "Auswerfen fehlgeschlagen"
+wait_task "$(api DELETE "/api/guests/$IGID" | json 'd["task_id"]')" 300
+api DELETE "/api/nodes/$NID/isos/ci-test.iso" | grep -q ok || fail "ISO löschen fehlgeschlagen"
+end
+
 step "Geroutete Zusatz-IPs: Erkennung und Pool mit Einzeladressen"
 # Simuliert Zusatz-IPs wie bei skrime/Hetzner: eine davon ist direkt auf der Netzwerkkarte eingetragen
 UPLINK="$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')"

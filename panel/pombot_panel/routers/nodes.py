@@ -1,5 +1,8 @@
 """Nodes (physische Hosts): hinzufügen per SSH oder Join-Code, Status, Images, Shell."""
 import json
+import re
+
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
@@ -11,7 +14,7 @@ from ..agent_client import AgentClient, AgentError, cert_fingerprint
 from ..db import SessionLocal, get_db
 from ..models import Guest, Node, User
 from ..security import audit, client_ip, current_user, require_admin
-from ..tasks import NODE_HISTORY, NODE_STATS, create_task, run_task, submit
+from ..tasks import NODE_HISTORY, NODE_STATS, agent_job, create_task, run_task, submit
 from .guests import proxy_websocket, same_origin, ws_user
 
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
@@ -192,6 +195,120 @@ def node_network(node_id: int, user: User = Depends(require_admin), db: Session 
     for a in data.get("addresses", []):
         a["pool"] = next((p.name for p in pools if ipam.version_of(p) == 4 and ipam.contains(p, a["address"])), None)
     return data
+
+
+# ---------------------------------------------------------------- ISO-Bibliothek
+
+UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _iso_client(db: Session, node_id: int, user: User) -> AgentClient:
+    node = db.get(Node, node_id)
+    if not node or (not user.is_admin and not node.enabled):
+        raise HTTPException(404, "Node nicht gefunden")
+    return AgentClient.for_node(node)
+
+
+def _agent_call(fn):
+    try:
+        return fn()
+    except AgentError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get("/{node_id}/isos")
+def node_isos(node_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    client = _iso_client(db, node_id, user)
+    return _agent_call(lambda: client.request("GET", "/isos"))
+
+
+@router.delete("/{node_id}/isos/{name}")
+def node_iso_delete(node_id: int, name: str, request: Request, user: User = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    in_use = [g for g in db.scalars(select(Guest).where(Guest.node_id == node_id, Guest.iso_file == name))]
+    if in_use:
+        raise HTTPException(400, f"Die ISO wird noch von {', '.join(g.name for g in in_use)} verwendet")
+    client = _iso_client(db, node_id, user)
+    _agent_call(lambda: client.request("DELETE", f"/isos/{name}"))
+    audit(db, user, "iso-delete", name, client_ip(request))
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/{node_id}/isos/uploads")
+def node_iso_upload_start(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    client = _iso_client(db, node_id, user)
+    return _agent_call(lambda: client.request("POST", "/isos/uploads"))
+
+
+@router.get("/{node_id}/isos/uploads/{upload_id}")
+def node_iso_upload_status(node_id: int, upload_id: str, user: User = Depends(require_admin),
+                           db: Session = Depends(get_db)):
+    if not UPLOAD_ID.match(upload_id):
+        raise HTTPException(400, "Ungültige Upload-ID")
+    client = _iso_client(db, node_id, user)
+    return _agent_call(lambda: client.request("GET", f"/isos/uploads/{upload_id}"))
+
+
+@router.put("/{node_id}/isos/uploads/{upload_id}")
+async def node_iso_upload_chunk(node_id: int, upload_id: str, request: Request, offset: int = 0,
+                                user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Reicht ein Stück der Datei als Datenstrom an den Agent weiter (ohne Zwischenspeicher)."""
+    if not UPLOAD_ID.match(upload_id):
+        raise HTTPException(400, "Ungültige Upload-ID")
+    client = _iso_client(db, node_id, user)
+    try:
+        async with httpx.AsyncClient(verify=client.ctx, timeout=httpx.Timeout(600, connect=15)) as http:
+            resp = await http.put(f"{client.base}/isos/uploads/{upload_id}", params={"offset": offset},
+                                  headers=client.headers, content=request.stream())
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Node nicht erreichbar: {exc}")
+    if resp.status_code >= 400:
+        raise HTTPException(400, resp.json().get("detail", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text)
+    return resp.json()
+
+
+class IsoFinishBody(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    size: int | None = None
+
+
+@router.post("/{node_id}/isos/uploads/{upload_id}/finish")
+def node_iso_upload_finish(node_id: int, upload_id: str, body: IsoFinishBody, request: Request,
+                           user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if not UPLOAD_ID.match(upload_id):
+        raise HTTPException(400, "Ungültige Upload-ID")
+    client = _iso_client(db, node_id, user)
+    result = _agent_call(lambda: client.request("POST", f"/isos/uploads/{upload_id}/finish", body.model_dump(),
+                                                timeout=120))
+    audit(db, user, "iso-upload", f"{result['file']} ({result['size'] >> 20} MiB)", client_ip(request))
+    db.commit()
+    return result
+
+
+@router.delete("/{node_id}/isos/uploads/{upload_id}")
+def node_iso_upload_abort(node_id: int, upload_id: str, user: User = Depends(require_admin),
+                          db: Session = Depends(get_db)):
+    if UPLOAD_ID.match(upload_id):
+        client = _iso_client(db, node_id, user)
+        _agent_call(lambda: client.request("DELETE", f"/isos/uploads/{upload_id}"))
+    return {"ok": True}
+
+
+class IsoFetchBody(BaseModel):
+    url: str = Field(pattern=r"^https?://", max_length=1000)
+    name: str = Field(min_length=1, max_length=160)
+
+
+@router.post("/{node_id}/isos/fetch")
+def node_iso_fetch(node_id: int, body: IsoFetchBody, request: Request, user: User = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    client = _iso_client(db, node_id, user)
+    task = create_task(db, user.id, "iso-fetch", f"{body.name} ({db.get(Node, node_id).name})", node_id)
+    audit(db, user, "iso-fetch", body.url, client_ip(request))
+    db.commit()
+    submit(run_task(task.id, agent_job(task.id, client, "POST", "/isos/fetch", body.model_dump())))
+    return {"task_id": task.id}
 
 
 @router.get("/{node_id}/backups")

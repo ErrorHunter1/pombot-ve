@@ -32,11 +32,11 @@ und auf den Server kopieren (das Repository ist privat, z. B. mit
 
 ```bash
 # Panel (Web-Oberfläche)
-sudo apt install ./pombot-panel_0.4.0_all.deb
+sudo apt install ./pombot-panel_0.4.1_all.deb
 sudo cat /root/pombot-admin.txt          # Adresse + Admin-Passwort
 
 # Node (auch auf demselben Server möglich) – gibt einen Join-Code aus
-sudo apt install ./pombot-agent_0.4.0_all.deb
+sudo apt install ./pombot-agent_0.4.1_all.deb
 ```
 
 `apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Updates: neues Paket
@@ -130,6 +130,8 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Server:** VMs (Cloud-Images oder ISO) und Container (Debian 12/13, Ubuntu 22.04/24.04 vorkonfiguriert,
   weitere Vorlagen per GUI), automatische Platzierung auf dem Node mit dem meisten freien RAM
 - **Steuerung:** Starten, Herunterfahren, Neustart, Stopp, Pausieren; Live-Auslastung mit Verlauf
+- **ISO-Bibliothek pro Node:** ISOs im Browser hochladen (in 32-MB-Stücken, auch mehrere GB) oder vom Node
+  per URL laden; VMs aus eigener ISO erstellen; ISO in bestehende VMs einlegen/auswerfen, Start von CD
 - **Konsole im Browser:** noVNC für VMs, Terminal (xterm.js) für Container, Root-Shell für Nodes (Admin)
 - **Ressourcen ändern:** CPU, RAM, Festplatte vergrößern (mit Kontingentprüfung)
 - **Netzwerk ändern:** IP tauschen, bestimmte IP wählen, Pool wechseln (geroutet ↔ Bridge), MAC-Adresse setzen;

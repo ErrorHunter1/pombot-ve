@@ -14,7 +14,7 @@ from websockets.asyncio.client import connect as ws_connect
 from .. import ipam, ops
 from ..agent_client import AgentClient, AgentError
 from ..db import SessionLocal, get_db, session_scope
-from ..models import Guest, IPAddress, IPPool, Template, User
+from ..models import Guest, IPAddress, IPPool, Node, Template, User
 from ..security import audit, client_ip, current_user, generate_password, guest_for
 from ..tasks import create_task, run_task, submit
 
@@ -29,7 +29,8 @@ def guest_dict(g: Guest) -> dict:
         "id": g.id, "vmid": g.vmid, "name": g.name, "hostname": g.hostname, "type": g.type,
         "node_id": g.node_id, "node": g.node.name if g.node else None,
         "owner_id": g.owner_id, "owner": g.owner.username if g.owner else None,
-        "template_id": g.template_id, "template": g.template.name if g.template else None,
+        "template_id": g.template_id, "template": g.template.name if g.template else (f"ISO: {g.iso_file}" if g.iso_file else None),
+        "iso_file": g.iso_file,
         "template_source": g.template.source if g.template else None,
         "cores": g.cores, "memory_mb": g.memory_mb, "disk_gb": g.disk_gb, "mac": g.mac,
         "status": g.status, "power": g.power, "error": g.error, "notes": g.notes,
@@ -95,7 +96,8 @@ def guest_status(guest_id: int, user: User = Depends(current_user), db: Session 
 # ---------------------------------------------------------------- Anlegen
 
 class CreateBody(BaseModel):
-    template_id: int
+    template_id: int | None = None
+    iso_file: str | None = Field(default=None, max_length=160)  # eigene ISO aus der Bibliothek des Nodes
     name: str = Field(min_length=1, max_length=64)
     hostname: str = Field(pattern=HOSTNAME)
     cores: int = Field(ge=1, le=128)
@@ -112,12 +114,28 @@ class CreateBody(BaseModel):
 @router.post("")
 def create_guest(body: CreateBody, request: Request, user: User = Depends(current_user),
                  db: Session = Depends(get_db)):
-    template = db.get(Template, body.template_id)
-    if not template or (not template.enabled and not user.is_admin):
-        raise HTTPException(400, "Vorlage nicht gefunden")
-    if body.disk_gb < template.min_disk_gb:
-        raise HTTPException(400, f"Diese Vorlage braucht mindestens {template.min_disk_gb} GB Speicher")
-    if template.type == "lxc" and body.memory_mb < 256:
+    template = None
+    if body.iso_file:
+        if not str(body.node).isdigit():
+            raise HTTPException(400, "Bei eigener ISO bitte den Node wählen, auf dem die ISO liegt")
+        node_for_iso = db.get(Node, int(body.node))
+        if not node_for_iso:
+            raise HTTPException(400, "Node nicht gefunden")
+        try:
+            available = {i["file"] for i in AgentClient.for_node(node_for_iso).request("GET", "/isos")}
+        except AgentError as exc:
+            raise HTTPException(502, str(exc))
+        if body.iso_file not in available:
+            raise HTTPException(400, f"ISO {body.iso_file} liegt nicht auf Node {node_for_iso.name}")
+        gtype = "kvm"
+    else:
+        template = db.get(Template, body.template_id) if body.template_id else None
+        if not template or (not template.enabled and not user.is_admin):
+            raise HTTPException(400, "Vorlage nicht gefunden")
+        if body.disk_gb < template.min_disk_gb:
+            raise HTTPException(400, f"Diese Vorlage braucht mindestens {template.min_disk_gb} GB Speicher")
+        gtype = template.type
+    if gtype == "lxc" and body.memory_mb < 256:
         raise HTTPException(400, "Container brauchen mindestens 256 MB RAM")
     if body.password and len(body.password) < 8:
         raise HTTPException(400, "Das Passwort muss mindestens 8 Zeichen lang sein")
@@ -132,13 +150,14 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
     keys = _keys(body.ssh_keys) or _keys(owner.ssh_keys)
 
     with ipam.alloc_lock:
-        node, v4, v6 = ops.resolve_placement(db, owner if not user.is_admin else user, template.type,
+        node, v4, v6 = ops.resolve_placement(db, owner if not user.is_admin else user, gtype,
                                              body.node, body.ipv4_pool, body.ipv6_pool)
         pools = [p for p in (v4, v6) if p]
         ops.check_quota(db, owner, guests=1, cores=body.cores, memory_mb=body.memory_mb,
                         disk_gb=body.disk_gb, ips=len(pools))
         guest = Guest(vmid=ops.next_vmid(db), name=body.name.strip(), hostname=body.hostname,
-                      type=template.type, node_id=node.id, owner_id=owner.id, template_id=template.id,
+                      type=gtype, node_id=node.id, owner_id=owner.id,
+                      template_id=template.id if template else None, iso_file=body.iso_file,
                       cores=body.cores, memory_mb=body.memory_mb, disk_gb=body.disk_gb, mac=ops.new_mac(db),
                       status="creating", power="unknown")
         db.add(guest)
@@ -155,7 +174,7 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
                     raise HTTPException(400, f"Die MAC {fixed_mac} für {ip.address} nutzt bereits ein anderer Server")
                 guest.mac = fixed_mac
         task = create_task(db, user.id, "create", f"{guest.name} (#{guest.vmid})", node.id, guest.id)
-        audit(db, user, "guest-create", f"#{guest.vmid} {guest.name} {template.name} auf {node.name}",
+        audit(db, user, "guest-create", f"#{guest.vmid} {guest.name} {template.name if template else body.iso_file} auf {node.name}",
               client_ip(request))
         db.commit()
     submit(run_task(task.id, ops.op_create(task.id, guest.id, password, keys)))
@@ -385,6 +404,33 @@ def change_network(guest_id: int, body: NetworkBody, request: Request, user: Use
     return {"task_id": task.id}
 
 
+class CdromBody(BaseModel):
+    iso_file: str | None = Field(default=None, max_length=160)
+    boot_cdrom: bool = False
+
+
+@router.get("/{guest_id}/cdrom")
+def get_cdrom(guest_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    g = guest_for(db, user, guest_id)
+    if g.type != "kvm":
+        raise HTTPException(400, "Nur VMs haben ein CD-Laufwerk")
+    return _call(lambda: _agent(g).request("GET", f"/guests/{g.agent_name}/cdrom"))
+
+
+@router.post("/{guest_id}/cdrom")
+def set_cdrom(guest_id: int, body: CdromBody, request: Request, user: User = Depends(current_user),
+              db: Session = Depends(get_db)):
+    g = guest_for(db, user, guest_id)
+    if g.type != "kvm":
+        raise HTTPException(400, "Nur VMs haben ein CD-Laufwerk")
+    _ensure_ready(g)
+    result = _call(lambda: _agent(g).request("POST", f"/guests/{g.agent_name}/cdrom", body.model_dump(), timeout=60))
+    audit(db, user, "guest-cdrom", f"#{g.vmid} {body.iso_file or 'ausgeworfen'}, Boot von CD: {body.boot_cdrom}",
+          client_ip(request))
+    db.commit()
+    return result
+
+
 class ReinstallBody(BaseModel):
     template_id: int | None = None
     password: str | None = Field(default=None, max_length=128)
@@ -404,8 +450,8 @@ def reinstall_guest(guest_id: int, body: ReinstallBody, request: Request, user: 
             raise HTTPException(400, "Die Vorlage muss vom selben Typ sein (VM bzw. Container)")
         if g.disk_gb < tpl.min_disk_gb:
             raise HTTPException(400, f"Diese Vorlage braucht mindestens {tpl.min_disk_gb} GB")
-        g.template_id = tpl.id
-    if not g.template_id:
+        g.template_id, g.iso_file = tpl.id, None
+    if not g.template_id and not g.iso_file:
         raise HTTPException(400, "Bitte eine Vorlage wählen")
     password = body.password or generate_password()
     keys = _keys(body.ssh_keys) or _keys(g.owner.ssh_keys)

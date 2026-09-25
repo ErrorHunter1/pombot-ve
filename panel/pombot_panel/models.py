@@ -122,6 +122,7 @@ class Guest(Base):
     node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id"))
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     template_id: Mapped[int | None] = mapped_column(ForeignKey("templates.id", ondelete="SET NULL"))
+    iso_file: Mapped[str | None] = mapped_column(String(160))  # VM aus eigener ISO (Bibliothek des Nodes)
     cores: Mapped[int] = mapped_column(Integer)
     memory_mb: Mapped[int] = mapped_column(Integer)
     disk_gb: Mapped[int] = mapped_column(Integer)

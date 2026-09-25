@@ -165,7 +165,7 @@ def new_mac(db: Session) -> str:
 
 # ---------------------------------------------------------------- Gast-Spezifikation
 
-def build_spec(db: Session, guest: Guest, template: Template, password: str | None,
+def build_spec(db: Session, guest: Guest, template: Template | None, password: str | None,
                ssh_keys: list[str], suffix: str = "1") -> dict:
     ips = sorted(guest.ips, key=lambda ip: ipam.version_of(ip.pool))
     pool = ips[0].pool if ips else None
@@ -186,7 +186,11 @@ def build_spec(db: Session, guest: Guest, template: Template, password: str | No
         "ssh_keys": ssh_keys,
         "instance_suffix": suffix,
     }
-    if template.type == "lxc":
+    if template is None:
+        if not guest.iso_file:
+            raise AgentError("Server hat weder Vorlage noch ISO")
+        spec["iso_file"] = guest.iso_file
+    elif template.type == "lxc":
         spec["lxc_dist"], spec["lxc_release"] = template.lxc_dist, template.lxc_release
     elif template.source == "iso":
         spec["iso_url"] = template.url

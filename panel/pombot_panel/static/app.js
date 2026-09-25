@@ -482,7 +482,7 @@ function taskRows(tasks) {
 const TASK_LABELS = {
   create: "Erstellen", delete: "Löschen", reinstall: "Neu installieren", resize: "Ressourcen ändern",
   snapshot: "Snapshot", "snapshot-delete": "Snapshot löschen", "snapshot-rollback": "Snapshot zurückspielen",
-  network: "Netzwerk ändern", domain: "Domain & Zertifikat", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
+  network: "Netzwerk ändern", domain: "Domain & Zertifikat", "iso-fetch": "ISO laden", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
 };
 
 async function viewDashboard(params, m, silent, seq) {
@@ -981,7 +981,7 @@ async function guestTasks(g, shell, seq) {
 
 async function guestSettings(g, shell) {
   const admin = S.me.role === "admin";
-  const [templates, users] = await Promise.all([api("/api/templates"), admin ? api("/api/users/brief") : []]);
+  const [templates, users, cdHtml] = await Promise.all([api("/api/templates"), admin ? api("/api/users/brief") : [], cdromCard(g)]);
   shell(`<div class="grid grid-2">
     <div class="card"><div class="card-head"><h2>Allgemein</h2></div><div class="card-body">
       <form id="gen-form">
@@ -991,6 +991,7 @@ async function guestSettings(g, shell) {
         <button class="btn primary" type="submit">Speichern</button>
       </form></div></div>
     <div class="stack">
+      ${cdHtml}
       <div class="card"><div class="card-head"><h2>root-Passwort zurücksetzen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Erzeugt ein neues zufälliges Passwort und setzt es im laufenden System${g.type === "kvm" ? " (über den qemu-guest-agent)" : ""}.</p>
         <button class="btn" data-act="resetPw" ${g.status === "ready" && g.power === "running" ? "" : "disabled"}>Neues Passwort erzeugen</button></div></div>
@@ -1011,6 +1012,7 @@ async function guestSettings(g, shell) {
     if (f.owner_id) body.owner_id = +f.owner_id.value;
     await api(`/api/guests/${g.id}`, { method: "PATCH", body }).then(() => { toast("Gespeichert"); updateSidebar(); }).catch(fail);
   };
+  bindCdrom(g);
   S.handlers.resetPw = async () => {
     if (!(await confirmBox("Passwort zurücksetzen?", "Das bisherige root-Passwort funktioniert danach nicht mehr.", { ok: "Zurücksetzen" }))) return;
     const r = await api(`/api/guests/${g.id}/password`, { method: "POST", body: {} });
@@ -1042,7 +1044,7 @@ async function viewCreate() {
   const free = admin ? { cores: 64, memory_mb: 262144, disk_gb: 4096 }
     : { cores: q.cores - u.cores, memory_mb: q.memory_mb - u.memory_mb, disk_gb: q.disk_gb - u.disk_gb };
   const blocked = !admin && (u.guests >= q.guests || free.cores < 1 || free.memory_mb < 256 || free.disk_gb < 2);
-  const C = { type: "kvm", template: null, name: "", hostname: "", manualHost: false };
+  const C = { type: "kvm", template: null, iso: null, isoList: null, name: "", hostname: "", manualHost: false };
 
   const onlineNodes = nodes.filter((n) => n.status === "online");
   const nodeOptions = `<option value="auto">Automatisch (Node mit dem meisten freien RAM)</option>` + (admin ? onlineNodes.map((n) =>
@@ -1066,6 +1068,7 @@ async function viewCreate() {
             <p class="muted small" style="margin-top:0" id="type-hint"></p>
             <div id="kvm-warn"></div>
             <div class="os-grid" id="os-grid"></div>
+            <div id="iso-pick"></div>
           </div></div>
 
         <div class="card"><div class="card-head"><span class="step-num">2</span><h2>Ressourcen</h2></div><div class="card-body">
@@ -1113,9 +1116,13 @@ async function viewCreate() {
   bindSliders(form);
   const renderOS = () => {
     const list = templates.filter((t) => t.type === C.type && t.enabled);
-    $("#os-grid").innerHTML = list.map(osCard).join("") || `<div class="muted">Keine Vorlagen für diesen Typ.</div>`;
-    if (!list.some((t) => t.id === (C.template && C.template.id))) C.template = list[0] || null;
-    $$(".os-card").forEach((b) => b.classList.toggle("active", C.template && +b.dataset.tpl === C.template.id));
+    $("#os-grid").innerHTML = (list.map(osCard).join("") || `<div class="muted">Keine Vorlagen für diesen Typ.</div>`)
+      + (C.type === "kvm" ? `<button type="button" class="os-card" data-tpl="iso"><span class="os-icon linux">ISO</span>
+          <span><div class="t">Eigene ISO</div><div class="s">aus der ISO-Bibliothek</div></span></button>` : "");
+    if (C.type !== "kvm") C.iso = null;
+    if (!C.iso && !list.some((t) => t.id === (C.template && C.template.id))) C.template = list[0] || null;
+    $$(".os-card").forEach((b) => b.classList.toggle("active", C.iso ? b.dataset.tpl === "iso" : C.template && +b.dataset.tpl === C.template.id));
+    renderIsoPick();
     $("#type-hint").textContent = C.type === "kvm"
       ? "Vollwertige virtuelle Maschine mit eigenem Kernel – ideal für alles, inkl. Docker und eigene Kernelmodule."
       : "Leichtgewichtiger Linux-Container – startet in Sekunden und braucht kaum Overhead.";
@@ -1146,7 +1153,7 @@ async function viewCreate() {
     const sel = (el) => el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : "";
     $("#summary").innerHTML = `
       <div class="sum-line"><span class="k">Typ</span><span class="v">${C.type === "kvm" ? "Virtuelle Maschine" : "Container"}</span></div>
-      <div class="sum-line"><span class="k">System</span><span class="v">${esc(t ? t.name : "–")}</span></div>
+      <div class="sum-line"><span class="k">System</span><span class="v">${esc(C.iso ? `ISO: ${C.iso.file || "–"}` : t ? t.name : "–")}</span></div>
       <div class="sum-line"><span class="k">CPU</span><span class="v">${f.cores.value} ${+f.cores.value === 1 ? "Kern" : "Kerne"}</span></div>
       <div class="sum-line"><span class="k">RAM</span><span class="v">${fmtMB(+f.memory_mb.value)}</span></div>
       <div class="sum-line"><span class="k">Speicher</span><span class="v">${f.disk_gb.value} GB</span></div>
@@ -1159,9 +1166,46 @@ async function viewCreate() {
     $$(".seg button[data-type]").forEach((x) => x.classList.toggle("active", x === b));
     renderOS();
   });
-  $("#os-grid").addEventListener("click", (e) => {
+  const renderIsoPick = () => {
+    const box = $("#iso-pick");
+    if (!C.iso) { box.innerHTML = ""; return; }
+    const opts = C.isoList.map((x) => `<option value="${x.node_id}|${esc(x.file)}" ${C.iso.file === x.file && C.iso.node_id === x.node_id ? "selected" : ""}>${esc(x.file)} – ${esc(x.node)} (${fmtBytes(x.size)})</option>`).join("");
+    box.innerHTML = C.isoList.length
+      ? `<label class="field" style="margin-top:14px"><span>ISO auswählen</span><select id="iso-select">${opts}</select>
+          <div class="hint">Nach dem Start installierst du das System über die Konsole. Die IP wird reserviert, muss bei der Installation aber selbst eingetragen werden (steht danach im Netzwerk-Tab).</div></label>`
+      : `<div class="alert warn" style="margin-top:14px">Noch keine ISO vorhanden. ${admin ? `Unter <a href="#/nodes">Nodes</a> → Node → ISOs hochladen.` : "Bitte einen Administrator, eine ISO bereitzustellen."}</div>`;
+    const sel = $("#iso-select");
+    if (sel) {
+      const apply = () => {
+        const [nid, file] = sel.value.split("|");
+        C.iso = { node_id: +nid, file };
+        form.node.value = nid;
+        update();
+      };
+      sel.onchange = apply;
+      apply();
+    }
+  };
+  $("#os-grid").addEventListener("click", async (e) => {
     const b = e.target.closest(".os-card");
     if (!b) return;
+    if (b.dataset.tpl === "iso") {
+      if (!C.isoList) {
+        C.isoList = [];
+        for (const n of onlineNodes) {
+          const l = await api(`/api/nodes/${n.id}/isos`).catch(() => []);
+          C.isoList.push(...l.filter((x) => !x.template).map((x) => ({ ...x, node_id: n.id, node: n.name })));
+        }
+      }
+      C.iso = C.isoList[0] ? { node_id: C.isoList[0].node_id, file: C.isoList[0].file } : { node_id: null, file: null };
+      C.template = null;
+      $$(".os-card").forEach((x) => x.classList.toggle("active", x === b));
+      renderIsoPick();
+      update();
+      return;
+    }
+    C.iso = null;
+    renderIsoPick();
     C.template = templates.find((t) => t.id === +b.dataset.tpl);
     $$(".os-card").forEach((x) => x.classList.toggle("active", x === b));
     update();
@@ -1187,11 +1231,12 @@ async function viewCreate() {
     e.preventDefault();
     const err = $("#create-error");
     err.classList.add("hidden");
-    if (!C.template) { err.textContent = "Bitte ein Betriebssystem wählen."; err.classList.remove("hidden"); return; }
+    if (!C.template && !(C.iso && C.iso.file)) { err.textContent = "Bitte ein Betriebssystem oder eine ISO wählen."; err.classList.remove("hidden"); return; }
     if (!form.name.value.trim()) { err.textContent = "Bitte einen Namen angeben."; err.classList.remove("hidden"); form.name.focus(); return; }
     const num = (v) => (/^\d+$/.test(v) ? +v : v);
     const body = {
-      template_id: C.template.id, name: form.name.value.trim(), hostname: form.hostname.value.trim(),
+      template_id: C.template ? C.template.id : null, iso_file: C.iso ? C.iso.file : null,
+      name: form.name.value.trim(), hostname: form.hostname.value.trim(),
       cores: +form.cores.value, memory_mb: +form.memory_mb.value, disk_gb: +form.disk_gb.value,
       node: num(form.node.value), ipv4_pool: num(form.ipv4_pool.value), ipv6_pool: num(form.ipv6_pool.value),
       password: form.password.value || null, ssh_keys: form.ssh_keys.value,
@@ -1324,7 +1369,7 @@ async function viewNode(params, m, silent, seq) {
   const head = pageHead(`${esc(n.name)} <span style="vertical-align:3px">${n.status === "online" ? badge("Online", "good") : badge("Offline", "bad")}</span>`,
     `${esc(n.info.os || "")} · ${esc(n.host)}:${n.port}`,
     `<button class="btn" data-act="shell" ${n.status === "online" ? "" : "disabled"}>${icon("terminal")}Shell</button>`);
-  const shell = (c) => setMain(head + tabs(base, tab, [["overview", "Übersicht"], ["guests", "Server"], ["images", "Images"], ["backups", "Backups"], ["settings", "Einstellungen"]]) + c);
+  const shell = (c) => setMain(head + tabs(base, tab, [["overview", "Übersicht"], ["guests", "Server"], ["isos", "ISOs"], ["images", "Images"], ["backups", "Backups"], ["settings", "Einstellungen"]]) + c);
 
   if (tab === "overview") {
     const i = n.info, s = n.stats;
@@ -1357,6 +1402,7 @@ async function viewNode(params, m, silent, seq) {
       </tbody></table></div>` : `<div class="empty">Auf diesem Node laufen keine Server.</div>`}</div>`);
     return { live: true };
   }
+  if (tab === "isos") return nodeIsoTab(n, shell);
   if (tab === "images") {
     const imgs = await api(`/api/nodes/${id}/images`).catch((e) => { toast(e.message, "bad"); return []; });
     S.handlers.imgDelete = async (ds) => {
@@ -1399,6 +1445,142 @@ async function viewNode(params, m, silent, seq) {
     if (!(await confirmBox("Node entfernen?", `<strong>${esc(n.name)}</strong> wird aus dem Panel entfernt.`, { danger: true, ok: "Entfernen", requireText: n.name }))) return;
     await api(`/api/nodes/${id}`, { method: "DELETE" });
     location.hash = "#/nodes";
+  };
+}
+
+// ------------------------------------------------------------------ ISO-Bibliothek (Node)
+
+const ISO_CHUNK = 32 * 1024 * 1024; // 32 MB je Anfrage – bleibt unter Proxy-Limits (z. B. Cloudflare 100 MB)
+
+async function uploadIso(nodeId, file, name, onProgress, isCancelled) {
+  const { upload_id: id } = await api(`/api/nodes/${nodeId}/isos/uploads`, { method: "POST" });
+  let offset = 0;
+  try {
+    while (offset < file.size) {
+      if (isCancelled()) throw new Error("Upload abgebrochen");
+      const chunk = file.slice(offset, offset + ISO_CHUNK);
+      let attempt = 0;
+      for (;;) {
+        try {
+          const res = await fetch(`/api/nodes/${nodeId}/isos/uploads/${id}?offset=${offset}`, {
+            method: "PUT", headers: { "X-PomBot": "1", "Content-Type": "application/octet-stream" }, body: chunk, credentials: "same-origin" });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Fehler ${res.status}`);
+          offset = data.offset;
+          break;
+        } catch (e) {
+          if (++attempt >= 4 || isCancelled()) throw e;
+          await new Promise((r) => setTimeout(r, 2000 * attempt));
+          // Stand vom Node holen – vielleicht ist das Stück doch angekommen
+          const st = await api(`/api/nodes/${nodeId}/isos/uploads/${id}`).catch(() => null);
+          if (st) offset = st.offset;
+        }
+      }
+      onProgress(offset, file.size);
+    }
+    return await api(`/api/nodes/${nodeId}/isos/uploads/${id}/finish`, { method: "POST", body: { name, size: file.size } });
+  } catch (e) {
+    api(`/api/nodes/${nodeId}/isos/uploads/${id}`, { method: "DELETE" }).catch(() => {});
+    throw e;
+  }
+}
+
+async function nodeIsoTab(n, shell) {
+  const isoList = await api(`/api/nodes/${n.id}/isos`).catch((e) => { toast(e.message, "bad"); return []; });
+  const total = isoList.reduce((a, i) => a + i.size, 0);
+  S.handlers.isoDelete = async (ds) => {
+    if (!(await confirmBox("ISO löschen?", `<code>${esc(ds.file)}</code> wird vom Node gelöscht.`, { danger: true, ok: "Löschen" }))) return;
+    await api(`/api/nodes/${n.id}/isos/${encodeURIComponent(ds.file)}`, { method: "DELETE" });
+    toast("ISO gelöscht");
+    route();
+  };
+  shell(`<div class="grid grid-2" style="margin-bottom:16px">
+    <div class="card"><div class="card-head"><h2>ISO hochladen</h2></div><div class="card-body">
+      <label class="field"><span>Datei von deinem Rechner</span><input type="file" id="iso-file" accept=".iso,application/x-iso9660-image"></label>
+      <label class="field"><span>Name auf dem Node</span><input type="text" id="iso-name" placeholder="wird aus dem Dateinamen übernommen"></label>
+      <div id="iso-progress" class="hidden" style="margin-bottom:12px"></div>
+      <div style="display:flex;gap:8px"><button class="btn primary" id="iso-upload">${icon("plus")}Hochladen</button><button class="btn hidden" id="iso-cancel">Abbrechen</button></div>
+      <p class="muted small" style="margin-bottom:0">Wird in Stücken zu 32 MB übertragen – auch mehrere GB große ISOs sind kein Problem. Das Fenster muss bis zum Ende offen bleiben.</p>
+    </div></div>
+    <div class="card"><div class="card-head"><h2>Von URL laden</h2></div><div class="card-body">
+      <label class="field"><span>Download-Adresse</span><input type="text" id="iso-url" placeholder="https://…/debian-13-amd64-netinst.iso"></label>
+      <label class="field"><span>Name auf dem Node</span><input type="text" id="iso-url-name" placeholder="z. B. debian-13-netinst.iso"></label>
+      <button class="btn" id="iso-fetch">Auf den Node laden</button>
+      <p class="muted small" style="margin-bottom:0">Der Node lädt die Datei direkt herunter – meist deutlich schneller als der Umweg über deinen Rechner.</p>
+    </div></div></div>
+    <div class="card"><div class="card-head"><h2>ISOs auf ${esc(n.name)}</h2><span class="muted small">${plural(isoList.length, "Datei", "Dateien")} · ${fmtBytes(total)}</span></div>
+      ${isoList.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Größe</th><th>Hinzugefügt</th><th>Herkunft</th><th></th></tr></thead><tbody>
+        ${isoList.map((i) => `<tr><td class="mono small">${esc(i.file)}</td><td>${fmtBytes(i.size)}</td><td class="nowrap small">${fmtDate(new Date(i.added * 1000).toISOString())}</td>
+          <td class="small" style="word-break:break-all;max-width:320px">${i.template ? "Vorlage (automatisch geladen)" : i.url ? esc(i.url) : "hochgeladen"}</td>
+          <td class="right"><button class="btn sm danger" data-act="isoDelete" data-file="${esc(i.file)}">Löschen</button></td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">Noch keine ISOs. Lade eine hoch oder lass sie den Node von einer URL laden – danach steht sie beim Erstellen unter „Eigene ISO“ zur Wahl.</div>`}</div>`);
+
+  const fileInput = $("#iso-file"), nameInput = $("#iso-name");
+  fileInput.onchange = () => { if (fileInput.files[0] && !nameInput.value) nameInput.value = fileInput.files[0].name.replace(/[^A-Za-z0-9._+-]/g, "_"); };
+  let cancelled = false;
+  $("#iso-upload").onclick = async () => {
+    const file = fileInput.files[0];
+    if (!file) return toast("Bitte eine Datei auswählen");
+    const name = (nameInput.value || file.name).trim();
+    cancelled = false;
+    S.live = false;
+    const bar = $("#iso-progress");
+    bar.classList.remove("hidden");
+    $("#iso-upload").disabled = true;
+    $("#iso-cancel").classList.remove("hidden");
+    const started = Date.now();
+    const show = (done, size) => {
+      const secs = (Date.now() - started) / 1000;
+      const rate = done / Math.max(secs, 1);
+      const eta = rate ? Math.round((size - done) / rate) : 0;
+      bar.innerHTML = meter("Übertragen", done, size, `${fmtBytes(done)} / ${fmtBytes(size)} · ${fmtBytes(rate)}/s · noch ca. ${eta > 60 ? Math.round(eta / 60) + " Min" : eta + " s"}`);
+    };
+    show(0, file.size);
+    try {
+      const r = await uploadIso(n.id, file, name, show, () => cancelled);
+      toast(`${r.file} hochgeladen`);
+      route();
+    } catch (e) {
+      bar.innerHTML = `<div class="alert bad">${esc(e.message)}</div>`;
+      $("#iso-upload").disabled = false;
+      $("#iso-cancel").classList.add("hidden");
+    }
+  };
+  $("#iso-cancel").onclick = () => { cancelled = true; };
+  $("#iso-fetch").onclick = async () => {
+    const url = $("#iso-url").value.trim();
+    const name = ($("#iso-url-name").value || url.split("/").pop().split("?")[0]).trim();
+    if (!url) return toast("Bitte eine URL angeben");
+    const r = await api(`/api/nodes/${n.id}/isos/fetch`, { method: "POST", body: { url, name } }).catch(fail);
+    if (!r) return;
+    await watchTask(r.task_id, `ISO laden: ${name}`);
+    route();
+  };
+}
+
+// ------------------------------------------------------------------ CD-Laufwerk (VM)
+
+async function cdromCard(g) {
+  if (g.type !== "kvm") return "";
+  const [cd, isoList] = await Promise.all([
+    api(`/api/guests/${g.id}/cdrom`).catch(() => null),
+    api(`/api/nodes/${g.node_id}/isos`).catch(() => []),
+  ]);
+  if (!cd) return "";
+  const media = cd.drives.find((d) => !d.seed);
+  return `<div class="card"><div class="card-head"><h2>CD/DVD-Laufwerk</h2>${media && media.file ? badge(media.file, "info") : badge("leer")}</div><div class="card-body">
+    <p class="muted" style="margin-top:0">ISO einlegen, z. B. für eine eigene Installation oder ein Rettungssystem. ISOs verwaltest du unter Nodes → ${esc(g.node)} → ISOs.</p>
+    <label class="field"><span>ISO</span><select id="cd-iso"><option value="">– kein Medium (auswerfen) –</option>
+      ${isoList.map((i) => `<option value="${esc(i.file)}" ${media && media.file === i.file ? "selected" : ""}>${esc(i.file)} (${fmtBytes(i.size)})</option>`).join("")}</select></label>
+    <label class="check"><input type="checkbox" id="cd-boot" ${cd.boot_cdrom ? "checked" : ""}><span>Von CD starten (vor der Festplatte)</span></label>
+    <button class="btn" data-act="cdApply">Übernehmen</button></div></div>`;
+}
+
+function bindCdrom(g) {
+  S.handlers.cdApply = async () => {
+    const r = await api(`/api/guests/${g.id}/cdrom`, { method: "POST", body: { iso_file: $("#cd-iso").value || null, boot_cdrom: $("#cd-boot").checked } });
+    toast(r.restart_needed ? "Gespeichert – wird nach Stoppen und Starten der VM aktiv" : "Gespeichert");
+    route();
   };
 }
 
