@@ -294,6 +294,11 @@ def status(name: str) -> dict:
         result["cpu"] = round(max(0.0, (cpu_ns - prev[1]) / ((now - prev[0]) * 1e9 * cfg["cores"]) * 100), 1)
     if kv.get("Memory use", "").isdigit():
         result["memory_used"] = int(kv["Memory use"])
+    else:  # cgroup v2: lxc-info liefert den Wert nicht immer
+        try:
+            result["memory_used"] = int(run(["lxc-cgroup", "-n", name, "memory.current"], timeout=10).strip())
+        except (CmdError, ValueError):
+            pass
     if kv.get("RX bytes", "").isdigit():
         result["net_rx"] = int(kv["RX bytes"])
         result["net_tx"] = int(kv.get("TX bytes", "0"))

@@ -92,7 +92,7 @@ end
 
 step "Firewall und Spoofing-Schutz"
 sudo nft list table bridge pombot | tee /tmp/nft-before.txt
-grep -q "ip saddr != { $IP }" /tmp/nft-before.txt || fail "Spoofing-Schutz fehlt"
+grep -Eq "ip saddr != (\{ )?$IP" /tmp/nft-before.txt || fail "Spoofing-Schutz fehlt"
 api PUT "/api/guests/$GID/firewall" '{"enabled":true,"policy_in":"drop","policy_out":"accept","rules":[{"direction":"in","action":"accept","protocol":"tcp","port":"22,80,443"},{"direction":"in","action":"accept","protocol":"icmp"}]}' | json 'd["enabled"], len(d["rules"])'
 sudo nft list table bridge pombot | tee /tmp/nft-after.txt
 grep -q "chain in_pv100" /tmp/nft-after.txt || fail "Eingangs-Kette fehlt"
