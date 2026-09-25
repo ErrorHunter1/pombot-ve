@@ -177,17 +177,18 @@ def _ssh_script(spec: dict) -> str:
     permit = "yes" if spec.get("password") else "prohibit-password"
     q = shlex.quote
     return f"""set -e
-for i in 1 2 3 4 5 6; do
+APT="-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1"
+for i in 1 2 3 4; do
   if command -v apt-get >/dev/null; then
-    apt-get update -qq 2>&1 | tail -n 3 && apt-get install -y -qq openssh-server >/dev/null 2>/tmp/pombot-apt.err \
-      && break
+    timeout 240 apt-get $APT update -qq 2>&1 | tail -n 3
+    timeout 300 apt-get $APT install -y -qq openssh-server >/dev/null 2>/tmp/pombot-apt.err && break
     tail -n 3 /tmp/pombot-apt.err 2>/dev/null || true
   elif command -v apk >/dev/null; then
-    apk add --no-cache openssh >/dev/null && break
+    timeout 300 apk add --no-cache openssh >/dev/null && break
   elif command -v dnf >/dev/null; then
-    dnf install -y -q openssh-server >/dev/null && break
+    timeout 300 dnf install -y -q openssh-server >/dev/null && break
   fi
-  echo "Paketinstallation fehlgeschlagen (Versuch $i/6), neuer Versuch in 5s …"; sleep 5
+  echo "Paketinstallation fehlgeschlagen (Versuch $i/4), neuer Versuch in 5s …"; sleep 5
 done
 if ! command -v sshd >/dev/null && [ ! -x /usr/sbin/sshd ]; then
   echo "WARNUNG: openssh-server konnte nicht installiert werden – hat der Container Internet?"

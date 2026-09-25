@@ -10,11 +10,12 @@ wieder her – der Dienst pombot-network.service macht das vor libvirt und LXC.
 import ipaddress
 import json
 import logging
+import shutil
 import threading
 from pathlib import Path
 
 from .config import DATA_DIR
-from .util import CmdError, check_name, run
+from .util import CmdError, check_name, ok, run
 
 log = logging.getLogger("pombot.routed")
 BRIDGE = "pbr0"
@@ -58,6 +59,22 @@ def ensure_bridge() -> None:
             SYSCTL_FILE.write_text(content)
     except OSError as exc:
         log.warning("Konnte %s nicht schreiben: %s", SYSCTL_FILE, exc)
+    allow_forwarding()
+
+
+def allow_forwarding() -> None:
+    """Docker und ufw setzen die iptables-FORWARD-Kette auf DROP. Dann würde jeder weitergeleitete
+    Verkehr der Gäste verworfen – egal was nftables erlaubt. Daher Gast-Verkehr dort explizit erlauben
+    (die eigentliche Filterung übernimmt die PomBot-Firewall in nftables). Wird regelmäßig geprüft,
+    weil Docker seine Regeln beim Neustart neu setzt."""
+    if not shutil.which("iptables"):
+        return
+    rules = [["-i", BRIDGE, "-j", "ACCEPT"], ["-o", BRIDGE, "-j", "ACCEPT"]]
+    if Path("/proc/sys/net/bridge").exists():  # br_netfilter aktiv: gebridgter Verkehr läuft durch iptables
+        rules.append(["-m", "physdev", "--physdev-is-bridged", "-j", "ACCEPT"])
+    for rule in rules:
+        if not ok(["iptables", "-C", "FORWARD", *rule], timeout=15):
+            run(["iptables", "-I", "FORWARD", "1", *rule], check=False, timeout=15)
 
 
 SKIP_IFACES = ("lo", BRIDGE, "virbr", "lxcbr", "docker", "veth", "vnet", "tap", "br-")
@@ -155,6 +172,7 @@ def remove_guest(name: str) -> None:
 
 def ensure_all() -> None:
     """Stellt Bridge und alle Routen wieder her (nach Neustart oder Netzwerk-Neustart)."""
+    allow_forwarding()  # auch für den Bridge-Modus (vmbr0) nötig, wenn Docker/ufw aktiv sind
     if not NET_DIR.exists():
         return
     files = list(NET_DIR.glob("pv*.json"))
