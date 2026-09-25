@@ -108,7 +108,7 @@ end
 step "Backup und Zeitplan"
 TID="$(api POST "/api/guests/$GID/backups" | json 'd["task_id"]')"
 wait_task "$TID" 900
-api GET "/api/guests/$GID/backups" | json '[(b["file"], b["size"]) for b in d]'
+api GET "/api/guests/$GID/backups" | json '[(b["file"], b["size"], b["location_name"]) for b in d["items"]]'
 api PUT "/api/guests/$GID/backup-schedule" '{"enabled":true,"frequency":"daily","weekday":6,"hour":3,"minute":0,"keep":3}' | json 'd["next_run"]'
 sudo lxc-info -n pv100 -s | grep -q RUNNING || fail "Container läuft nach dem Backup nicht wieder"
 end
