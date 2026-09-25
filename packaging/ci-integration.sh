@@ -138,7 +138,7 @@ if [ -e /dev/kvm ]; then
   KVMID="$(echo "$RES" | json 'd["vmid"]')"
   wait_task "$(echo "$RES" | json 'd["task_id"]')" 1500
   KIP="$(api GET "/api/guests/$KGID" | json 'd["ips"][0]["address"]')"
-  sudo virsh dumpxml "pv$KVMID" | grep -qE "<serial|<console" && fail "VM hat noch eine serielle Konsole"
+  sudo virsh dumpxml "pv$KVMID" | grep -q "<serial" || fail "VM hat keine serielle Konsole (ohne sie bootet das Cloud-Image nicht)"
   echo "Warte, bis die VM gebootet ist und SSH auf $KIP antwortet (cloud-init) …"
   for i in $(seq 1 72); do
     if timeout 3 bash -c "echo > /dev/tcp/$KIP/22" 2>/dev/null; then echo "SSH erreichbar nach $((i * 5)) s"; break; fi
