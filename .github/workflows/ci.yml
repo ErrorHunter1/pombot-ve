@@ -36,6 +36,13 @@ jobs:
           path: dist
       - name: Integrationstest (echter LXC-Container, Firewall, Backup)
         run: bash packaging/ci-integration.sh
+      - name: Diagnose hochladen
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnose
+          path: /tmp/diag
+          if-no-files-found: ignore
       - name: Logs bei Fehler
         if: failure()
         run: |

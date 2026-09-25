@@ -144,7 +144,18 @@ if [ -e /dev/kvm ]; then
     if timeout 3 bash -c "echo > /dev/tcp/$KIP/22" 2>/dev/null; then echo "SSH erreichbar nach $((i * 5)) s"; break; fi
     sleep 5
   done
-  timeout 3 bash -c "echo > /dev/tcp/$KIP/22" || { sudo virsh list --all; sudo virsh domifaddr "pv$KVMID" || true; fail "VM nicht per SSH erreichbar"; }
+  if ! timeout 3 bash -c "echo > /dev/tcp/$KIP/22"; then
+    mkdir -p /tmp/diag
+    sudo virsh screenshot "pv$KVMID" /tmp/diag/vm-screen.ppm && (convert /tmp/diag/vm-screen.ppm /tmp/diag/vm-screen.png || true)
+    sudo cp /var/log/libvirt/qemu/pv$KVMID.log /tmp/diag/ 2>/dev/null || true
+    sudo cp -r "/var/lib/pombot/guests/pv$KVMID/seed" /tmp/diag/seed 2>/dev/null || true
+    sudo virsh dumpxml "pv$KVMID" > /tmp/diag/domain.xml
+    { ping -c 2 -W 2 "$KIP"; ip neigh; bridge fdb show br vmbr0; bridge link; sudo virsh domiflist "pv$KVMID";
+      sudo virsh domstats "pv$KVMID" --interface --cpu-total; sudo iptables -S FORWARD; ls -la /dev/kvm; } > /tmp/diag/net.txt 2>&1
+    sudo chmod -R a+r /tmp/diag
+    cat /tmp/diag/net.txt
+    fail "VM nicht per SSH erreichbar"
+  fi
   sleep 20
   api GET "/api/guests/$KGID/status" | json 'd["state"], d["cpu"], d["memory_used"]'
   wait_task "$(api DELETE "/api/guests/$KGID" | json 'd["task_id"]')" 300
