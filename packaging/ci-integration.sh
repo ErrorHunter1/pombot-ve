@@ -73,7 +73,12 @@ step "Container prüfen"
 sudo lxc-ls -f
 IP="$(api GET "/api/guests/$GID" | json 'd["ips"][0]["address"]')"
 echo "Zugewiesene IP: $IP"
-sudo lxc-attach -n pv100 -- ip -4 addr show eth0 | grep -q "$IP" || fail "IP $IP ist im Container nicht gesetzt"
+if ! sudo lxc-attach -n pv100 -- ip -4 addr show eth0 | grep -q "$IP"; then
+  echo "--- Diagnose"
+  sudo cat /var/lib/lxc/pv100/config
+  sudo lxc-attach -n pv100 -- sh -c 'ip addr; ip route; ls -la /etc/netplan /etc/systemd/network /etc/network 2>&1; cat /etc/systemd/network/*.network /etc/network/interfaces 2>&1; systemctl is-enabled systemd-networkd networking 2>&1; networkctl status eth0 2>&1 | head -30'
+  fail "IP $IP ist im Container nicht gesetzt"
+fi
 sudo lxc-attach -n pv100 -- hostname | grep -q ci-ct || fail "Hostname nicht gesetzt"
 ping -c 2 -W 2 "$IP" || fail "Container nicht per Ping erreichbar"
 sudo lxc-attach -n pv100 -- sh -c 'command -v sshd' || fail "SSH-Server nicht installiert"

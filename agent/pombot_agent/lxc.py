@@ -108,6 +108,21 @@ def _stop(name: str, job=None, timeout: int = 60) -> None:
 
 # ---------------------------------------------------------------- Anlegen
 
+def _set_net_config(name: str, ips: list[dict]) -> None:
+    """IP-Adressen zusätzlich über LXC setzen: Sie sind dann schon beim Start aktiv – unabhängig davon,
+    welches Netzwerksystem die Distribution im Container verwendet."""
+    lines = [ln for ln in _read_config(name)
+             if not ln.split("=", 1)[0].strip().startswith(("lxc.net.0.ipv4.", "lxc.net.0.ipv6."))]
+    for ip in ips:
+        fam = "ipv4" if ip["version"] == 4 else "ipv6"
+        lines.append(f"lxc.net.0.{fam}.address = {ip['address']}/{ip['prefix']}")
+        if ip.get("gateway"):
+            lines.append(f"lxc.net.0.{fam}.gateway = {ip['gateway']}")
+    (_dir(name) / "config").write_text("
+".join(lines) + "
+")
+
+
 def _network_script(spec: dict) -> str:
     ips, dns = spec.get("ips") or [], spec.get("dns") or []
     hostname = spec.get("hostname") or spec["name"]
@@ -189,6 +204,7 @@ def create(job, spec: dict) -> dict:
         run(cmd, job=job, timeout=3600, env={"DOWNLOAD_KEYSERVER": LXC_KEYSERVER})
         for key, value in _limits(spec["cores"], spec["memory_mb"]).items():
             set_config(name, key, value)
+        _set_net_config(name, spec.get("ips") or [])
         set_config(name, "lxc.start.auto", "1")
         set_config(name, "lxc.uts.name", (spec.get("hostname") or name).split(".")[0])
         job.write("Starte Container …")
