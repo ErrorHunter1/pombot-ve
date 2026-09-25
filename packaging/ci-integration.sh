@@ -153,7 +153,9 @@ sysctl net.ipv4.ip_forward "net.ipv4.conf.$UPLINK.proxy_arp"
 sudo lxc-attach -n "pv$RVMID" -- ip -4 addr show eth0 | grep -q "192.0.2.10/32" || fail "IP /32 nicht im Container"
 sudo lxc-attach -n "pv$RVMID" -- ip route | tee /dev/stderr | grep -q "default via" || fail "Default-Route fehlt im Container"
 ping -c 2 -W 2 192.0.2.10 || fail "Gerouteter Container nicht erreichbar"
-sudo lxc-attach -n "pv$RVMID" -- ping -c 2 -W 3 1.1.1.1 || fail "Gerouteter Container hat kein Internet"
+# Azure (GitHub-Runner) blockiert ausgehendes ICMP – daher TCP-Verbindung statt Ping prüfen
+sudo lxc-attach -n "pv$RVMID" -- timeout 10 bash -c 'echo > /dev/tcp/1.1.1.1/443' || fail "Gerouteter Container hat kein Internet"
+echo "Internet aus dem gerouteten Container: OK (TCP 1.1.1.1:443)"
 sudo lxc-attach -n "pv$RVMID" -- test -x /usr/sbin/sshd || fail "SSH im gerouteten Container nicht installiert"
 sudo nft list chain bridge pombot input | grep -q "jump out_pv$RVMID" || fail "Spoofing-Schutz greift im gerouteten Modus nicht"
 end
