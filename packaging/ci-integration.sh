@@ -127,6 +127,33 @@ sudo nft list table bridge pombot | grep -q pv100 && fail "Firewall-Regeln wurde
 api GET /api/pools | json '[(p["name"], p["used"]) for p in d]'
 end
 
+step "KVM-VM (Debian-12-Cloud-Image, verschachtelte Virtualisierung wie bei VPS-Hostern)"
+if [ -e /dev/kvm ]; then
+  sudo chmod 666 /dev/kvm || true
+  KTPL="$(api GET /api/templates | json '[t["id"] for t in d if t["type"]=="kvm" and t["name"].startswith("Debian 12")][0]')"
+  CIPOOL="$(api GET /api/pools | json '[p["id"] for p in d if p["name"]=="ci"][0]')"
+  RES="$(api POST /api/guests "{\"template_id\":$KTPL,\"name\":\"ci-vm\",\"hostname\":\"ci-vm\",\"cores\":2,\"memory_mb\":1024,\"disk_gb\":8,\"ipv4_pool\":$CIPOOL,\"password\":\"CiTestPasswort1\"}")"
+  echo "$RES"
+  KGID="$(echo "$RES" | json 'd["guest_id"]')"
+  KVMID="$(echo "$RES" | json 'd["vmid"]')"
+  wait_task "$(echo "$RES" | json 'd["task_id"]')" 1500
+  KIP="$(api GET "/api/guests/$KGID" | json 'd["ips"][0]["address"]')"
+  sudo virsh dumpxml "pv$KVMID" | grep -qE "<serial|<console" && fail "VM hat noch eine serielle Konsole"
+  echo "Warte, bis die VM gebootet ist und SSH auf $KIP antwortet (cloud-init) …"
+  for i in $(seq 1 72); do
+    if timeout 3 bash -c "echo > /dev/tcp/$KIP/22" 2>/dev/null; then echo "SSH erreichbar nach $((i * 5)) s"; break; fi
+    sleep 5
+  done
+  timeout 3 bash -c "echo > /dev/tcp/$KIP/22" || { sudo virsh list --all; sudo virsh domifaddr "pv$KVMID" || true; fail "VM nicht per SSH erreichbar"; }
+  sleep 20
+  api GET "/api/guests/$KGID/status" | json 'd["state"], d["cpu"], d["memory_used"]'
+  wait_task "$(api DELETE "/api/guests/$KGID" | json 'd["task_id"]')" 300
+  sudo virsh list --all --name | grep -q "pv$KVMID" && fail "VM wurde nicht gelöscht"
+else
+  echo "::warning::/dev/kvm fehlt auf diesem Runner – KVM-Test übersprungen"
+fi
+end
+
 step "Geroutete Zusatz-IPs: Erkennung und Pool mit Einzeladressen"
 # Simuliert Zusatz-IPs wie bei skrime/Hetzner: eine davon ist direkt auf der Netzwerkkarte eingetragen
 UPLINK="$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')"

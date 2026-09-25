@@ -94,8 +94,6 @@ def domain_xml(spec: dict, disk: Path, cdrom: Path | None, kvm: bool) -> str:
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
-    <serial type='pty'/>
-    <console type='pty'/>
     <input type='tablet' bus='usb'/>
     <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
     <video><model type='vga'/></video>
@@ -172,6 +170,31 @@ def action(name: str, act: str) -> str:
         raise CmdError("Unbekannte Aktion")
     run(cmds[act], timeout=120)
     return state(name)
+
+
+def remove_serial_consoles() -> list[str]:
+    """Entfernt die serielle Konsole aus bestehenden VMs (ältere PomBot-Versionen hatten eine).
+    Bei verschachtelter Virtualisierung (Server ist selbst eine VM) ist die emulierte serielle
+    Schnittstelle extrem langsam und bringt den Kernel der VM beim Booten zum Hängen.
+    Wirkt ab dem nächsten Stoppen/Starten der VM."""
+    changed = []
+    for name in list_guests():
+        try:
+            root = _xml(name, inactive=True)
+            devices = root.find("devices")
+            found = [el for el in devices if el.tag in ("serial", "console")]
+            if not found:
+                continue
+            for el in found:
+                devices.remove(el)
+            path = _guest_dir(name) / "domain.xml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(ET.tostring(root, encoding="unicode"))
+            run(["virsh", "define", path])
+            changed.append(name)
+        except (CmdError, ET.ParseError, OSError):
+            continue
+    return changed
 
 
 def _xml(name: str, inactive: bool = False) -> ET.Element:

@@ -989,6 +989,7 @@ async function viewCreate() {
           <div class="seg"><button type="button" data-type="kvm" class="active">Virtuelle Maschine</button><button type="button" data-type="lxc">Container</button></div></div>
           <div class="card-body">
             <p class="muted small" style="margin-top:0" id="type-hint"></p>
+            <div id="kvm-warn"></div>
             <div class="os-grid" id="os-grid"></div>
           </div></div>
 
@@ -1045,7 +1046,22 @@ async function viewCreate() {
       : "Leichtgewichtiger Linux-Container – startet in Sekunden und braucht kaum Overhead.";
     update();
   };
+  const kvmWarning = () => {
+    const box = $("#kvm-warn");
+    if (C.type !== "kvm") { box.innerHTML = ""; return; }
+    const chosen = form.node.value === "auto" ? onlineNodes : onlineNodes.filter((n) => String(n.id) === form.node.value);
+    const noKvm = chosen.filter((n) => n.info.kvm === false);
+    const nested = chosen.filter((n) => n.info.kvm && n.info.virtualization && n.info.virtualization !== "none");
+    if (chosen.length && noKvm.length === chosen.length) {
+      box.innerHTML = `<div class="alert bad" style="margin-bottom:12px"><strong>Keine Hardware-Beschleunigung:</strong> VMs laufen hier nur in Software-Emulation und sind extrem langsam. Nimm stattdessen einen <strong>Container</strong> – der läuft mit voller Geschwindigkeit.</div>`;
+    } else if (nested.length) {
+      box.innerHTML = `<div class="alert warn" style="margin-bottom:12px"><strong>Verschachtelte Virtualisierung:</strong> Der Node ist selbst eine VM (${esc(nested[0].info.virtualization)}). VMs funktionieren, sind aber langsamer und beim ersten Start träger. Für beste Leistung einen <strong>Container</strong> wählen.</div>`;
+    } else {
+      box.innerHTML = "";
+    }
+  };
   const update = () => {
+    kvmWarning();
     const f = form;
     const t = C.template;
     if (t && +f.disk_gb.value < t.min_disk_gb) { f.disk_gb.value = t.min_disk_gb; f["disk_gb-range"].value = t.min_disk_gb; }
@@ -1217,7 +1233,8 @@ async function viewNodes(params, m, silent, seq) {
         <div class="card-head"><span class="dot-status ${n.status === "online" ? "good" : "bad"}"></span><h2>${esc(n.name)}</h2>
           ${n.status === "online" ? badge("Online", "good") : badge("Offline", "bad")}${n.enabled ? "" : badge("Gesperrt", "warn")}</div>
         <div class="card-body">${nodeMeters(n)}
-          <div class="muted small" style="margin-top:12px">${esc(n.info.os || "")} · ${n.info.cpu_cores || "?"} Kerne · ${plural(n.guests, "Server", "Server")}${n.info.kvm === false ? " · <span style='color:var(--warn)'>ohne KVM-Beschleunigung</span>" : ""}</div>
+          <div class="muted small" style="margin-top:12px">${esc(n.info.os || "")} · ${n.info.cpu_cores || "?"} Kerne · ${plural(n.guests, "Server", "Server")}${n.info.kvm === false ? " · <span style='color:var(--warn)'>ohne KVM-Beschleunigung</span>"
+            : n.info.virtualization && n.info.virtualization !== "none" ? ` · <span style='color:var(--warn)'>verschachtelt (${esc(n.info.virtualization)})</span>` : ""}</div>
         </div></a>`).join("")}</div>`
       : `<div class="card"><div class="empty">Noch keine Nodes. Füge deinen ersten Server hinzu – die Installation läuft automatisch per SSH.<br><br><button class="btn primary" data-act="addNode">${icon("plus")}Node hinzufügen</button></div></div>`}`);
   return { live: true };
@@ -1246,6 +1263,8 @@ async function viewNode(params, m, silent, seq) {
         <dt>Hostname</dt><dd>${esc(i.hostname || "–")}</dd><dt>System</dt><dd>${esc(i.os || "–")}</dd><dt>Kernel</dt><dd>${esc(i.kernel || "–")}</dd>
         <dt>CPU</dt><dd>${esc(i.cpu_model || "–")} (${i.cpu_cores || "?"} Threads)</dd>
         <dt>KVM</dt><dd>${i.kvm ? badge("Hardware-Beschleunigung", "good") : badge("Nicht verfügbar", "warn")}</dd>
+        <dt>Host-Typ</dt><dd>${!i.virtualization ? "–" : i.virtualization === "none" ? badge("Echte Hardware", "good")
+          : `${badge(`Selbst virtuell (${i.virtualization})`, "warn")}<div class="muted small">Verschachtelte Virtualisierung: VMs sind langsamer, Container empfohlen.</div>`}</dd>
         <dt>libvirt</dt><dd>${esc(i.libvirt || "–")}</dd><dt>LXC</dt><dd>${esc(i.lxc || "–")}</dd>
         <dt>Bridges</dt><dd>${(i.bridges || []).map((b) => `<code>${esc(b)}</code>`).join(" ") || `<span style="color:var(--warn)">keine – Server brauchen eine Bridge (z. B. vmbr0)</span>`}</dd>
         <dt>Laufzeit</dt><dd>${s ? fmtUptime(s.uptime) : "–"}</dd>

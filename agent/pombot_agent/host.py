@@ -67,6 +67,8 @@ def info() -> dict:
         "memory_total": psutil.virtual_memory().total,
         "disk_total": du.total,
         "kvm": os.path.exists("/dev/kvm"),
+        # "none" = echte Hardware, sonst z. B. "kvm"/"vmware": Node ist selbst virtuell (Nested Virtualization)
+        "virtualization": (_version(["systemd-detect-virt"]) or "none"),
         "libvirt": _version(["virsh", "--version"]),
         "lxc": _version(["lxc-start", "--version"]),
         "bridges": bridges(),

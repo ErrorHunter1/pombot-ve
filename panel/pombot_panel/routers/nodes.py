@@ -27,7 +27,7 @@ def node_dict(n: Node, admin: bool) -> dict:
         "committed_memory_mb": sum(g.memory_mb for g in n.guests),
         "committed_cores": sum(g.cores for g in n.guests),
         "info": {k: info.get(k) for k in ("os", "cpu_cores", "memory_total", "disk_total", "kvm", "bridges",
-                                          "libvirt", "lxc", "cpu_model", "kernel", "agent_version", "hostname",
+                                          "libvirt", "lxc", "cpu_model", "kernel", "agent_version", "hostname", "virtualization",
                                           "main_ipv4")},
         "stats": stats,
         "last_seen": n.last_seen.isoformat() + "Z" if n.last_seen else None,

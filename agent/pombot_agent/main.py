@@ -32,6 +32,12 @@ async def lifespan(_: FastAPI):
             except Exception as exc:  # noqa: BLE001
                 log.error("Firewall konnte nicht geladen werden: %s", exc)
             await asyncio.sleep(60)
+    try:
+        changed = await asyncio.to_thread(kvm.remove_serial_consoles)
+        if changed:
+            log.info("Serielle Konsole entfernt bei: %s (wirkt nach Stoppen/Starten)", ", ".join(changed))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Migration der VM-Definitionen fehlgeschlagen: %s", exc)
     task = asyncio.create_task(watchdog())
     yield
     task.cancel()
