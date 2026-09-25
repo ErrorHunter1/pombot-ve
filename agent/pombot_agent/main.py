@@ -7,10 +7,10 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, host, images, isos, kvm, lxc, remote, routed
+from . import console, firewall, host, images, isos, kvm, lxc, migrate, remote, routed
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -187,7 +187,7 @@ def guest_create(spec: CreateSpec):
 
     def _create(job, d):
         if d["routed"]:
-            routed.set_guest(d["name"], [ip["address"] for ip in d["ips"] if ip["version"] == 4], job)
+            routed.set_guest(d["name"], [ip["address"] for ip in d["ips"]], job)
         try:
             return mod.create(job, d)
         except Exception:
@@ -262,7 +262,7 @@ def guest_network(name: str, body: NetworkBody):
     def _network(job, n, d):
         routed.remove_guest(n)
         if d["routed"]:
-            routed.set_guest(n, [ip["address"] for ip in d["ips"] if ip["version"] == 4], job)
+            routed.set_guest(n, [ip["address"] for ip in d["ips"]], job)
         return mod.set_network(job, n, d)
     return job_response(start_job("network", name, _network, name, data))
 
@@ -370,6 +370,24 @@ def firewall_put(name: str, cfg: dict):
 def firewall_delete(name: str):
     firewall.remove(check_name(name))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- Migration
+
+@app.get("/guests/{name}/export/info", dependencies=[Depends(auth)])
+def guest_export_info(name: str):
+    return migrate.export_info(name)
+
+
+@app.get("/guests/{name}/export", dependencies=[Depends(auth)])
+def guest_export(name: str):
+    migrate.export_info(name)  # prüft vorab (existiert, gestoppt) – Fehler als normale Antwort
+    return StreamingResponse(migrate.export_stream(name), media_type="application/x-tar")
+
+
+@app.put("/guests/{name}/import", dependencies=[Depends(auth)])
+async def guest_import(name: str, request: Request):
+    return await migrate.import_stream(name, request.stream())
 
 
 # ---------------------------------------------------------------- Externe Backup-Speicher

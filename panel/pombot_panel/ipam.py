@@ -17,6 +17,7 @@ from .config import settings
 from .models import IPAddress, IPPool, Node
 
 ROUTED_BRIDGE = "pbr0"
+ROUTED_GATEWAY6 = "fe80::1"
 # Vergabe serialisieren, damit zwei gleichzeitige Bestellungen nie dieselbe IP bekommen.
 alloc_lock = threading.Lock()
 MAX_SCAN = 1_000_000
@@ -117,8 +118,6 @@ def validate_pool(mode: str, network: str, gateway: str | None, range_start: str
     if len(versions) > 1:
         raise HTTPException(400, "IPv4 und IPv6 bitte in getrennten Pools anlegen")
     if mode == "routed":
-        if versions != {4}:
-            raise HTTPException(400, "Der geroutete Modus unterstützt derzeit nur IPv4")
         return str(net) if net else ""
     # Bridge-Modus: Präfix und Gateway kommen aus dem Netz
     if not net:
@@ -218,6 +217,8 @@ def ip_spec(ip: IPAddress, node: Node) -> dict:
     pool = ip.pool
     version = ipaddress.ip_address(ip.address).version
     if is_routed(pool):
+        if version == 6:  # Gateway ist die Link-Local-Adresse fe80::1 auf pbr0 (für jeden Node gleich)
+            return {"address": ip.address, "prefix": 128, "gateway": ROUTED_GATEWAY6, "version": 6}
         gateway = node.info.get("main_ipv4")
         if not gateway:
             raise HTTPException(400, f"Haupt-IP von Node {node.name} unbekannt – bitte unter Nodes "

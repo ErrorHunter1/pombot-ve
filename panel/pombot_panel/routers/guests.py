@@ -286,15 +286,16 @@ class NetworkBody(BaseModel):
     mac: str | None = None  # nur Admin
 
 
-def _pick(db: Session, user: User, g: Guest, version: int, choice, address: str | None):
+def _pick(db: Session, user: User, g: Guest, version: int, choice, address: str | None, node: Node | None = None):
     """Liefert (Pool, Adresse) für eine neue IP. Wirft HTTPException bei ungültiger Wahl."""
     pool = db.get(IPPool, int(choice)) if str(choice).isdigit() else None
     if not pool or (pool.admin_only and not user.is_admin):
         raise HTTPException(400, "IP-Pool nicht gefunden")
     if ipam.version_of(pool) != version:
         raise HTTPException(400, f"{pool.name} ist kein IPv{version}-Pool")
-    if not ops.pool_fits_node(pool, g.node):
-        raise HTTPException(400, f"Pool {pool.name} ist auf Node {g.node.name} nicht verfügbar")
+    node = node or g.node
+    if not ops.pool_fits_node(pool, node):
+        raise HTTPException(400, f"Pool {pool.name} ist auf Node {node.name} nicht verfügbar")
     if address:
         try:
             address = str(ipaddress.ip_address(address.strip()))
@@ -346,8 +347,6 @@ def change_network(guest_id: int, body: NetworkBody, request: Request, user: Use
         bridges = {p.bridge for p in pools if not ipam.is_routed(p)}
         if len({ipam.is_routed(p) for p in pools}) > 1 or len(bridges) > 1:
             raise HTTPException(400, "Alle IPs eines Servers müssen im selben Modus sein (geroutet bzw. dieselbe Bridge)")
-        if any(ipam.is_routed(p) and ipam.version_of(p) == 6 for p in pools):
-            raise HTTPException(400, "Geroutete Pools unterstützen nur IPv4")
         ops.check_quota(db, g.owner, ips=len(keep) + len(wanted), exclude_guest=g.id)
         if not mac:
             fixed = [ipam.pool_macs(p).get(a) for p, a in wanted]
@@ -429,6 +428,88 @@ def set_cdrom(guest_id: int, body: CdromBody, request: Request, user: User = Dep
           client_ip(request))
     db.commit()
     return result
+
+
+class MigrateBody(BaseModel):
+    node_id: int
+    ipv4_pool: str | int = "keep"  # keep (nur wenn der Pool auf dem Ziel verfügbar ist) | none | <Pool-ID>
+    ipv4_address: str | None = None
+    ipv6_pool: str | int = "keep"
+    ipv6_address: str | None = None
+
+
+@router.get("/{guest_id}/migrate/check")
+def migrate_check(guest_id: int, node_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Welche IPs auf dem Ziel-Node weiterverwendet werden können."""
+    if not user.is_admin:
+        raise HTTPException(403, "Nur Administratoren können Server umziehen")
+    g = guest_for(db, user, guest_id)
+    node = db.get(Node, node_id)
+    if not node:
+        raise HTTPException(404, "Node nicht gefunden")
+    return {"ips": [{"address": ip.address, "pool": ip.pool.name, "version": ipam.version_of(ip.pool),
+                     "usable": ops.pool_fits_node(ip.pool, node)} for ip in g.ips]}
+
+
+@router.post("/{guest_id}/migrate")
+def migrate_guest(guest_id: int, body: MigrateBody, request: Request, user: User = Depends(current_user),
+                  db: Session = Depends(get_db)):
+    if not user.is_admin:
+        raise HTTPException(403, "Nur Administratoren können Server umziehen")
+    g = guest_for(db, user, guest_id)
+    _ensure_ready(g)
+    target = db.get(Node, body.node_id)
+    if not target or target.id == g.node_id:
+        raise HTTPException(400, "Bitte einen anderen Node wählen")
+    if target.status != "online":
+        raise HTTPException(400, f"Node {target.name} ist nicht online")
+    if not ops.node_supports(target, g.type):
+        raise HTTPException(400, f"Node {target.name} unterstützt {'VMs' if g.type == 'kvm' else 'Container'} nicht")
+    if g.power == "missing":
+        raise HTTPException(400, "Server auf dem aktuellen Node nicht gefunden")
+    with ipam.alloc_lock:
+        keep, drop, wanted = [], [], []
+        choices = ((4, body.ipv4_pool, body.ipv4_address), (6, body.ipv6_pool, body.ipv6_address))
+        for version, choice, address in choices:
+            current = [ip for ip in g.ips if ipam.version_of(ip.pool) == version]
+            if choice == "keep":
+                for ip in current:
+                    if not ops.pool_fits_node(ip.pool, target):
+                        raise HTTPException(400, f"{ip.address} (Pool {ip.pool.name}) ist auf {target.name} nicht nutzbar "
+                                                 "– bitte eine neue IP wählen")
+                keep += current
+                continue
+            if choice not in ("none", "", None):
+                wanted.append(_pick(db, user, g, version, choice, address, node=target))
+            drop += current
+        pools = [ip.pool for ip in keep] + [p for p, _ in wanted]
+        if len({ipam.is_routed(p) for p in pools}) > 1 or len({p.bridge for p in pools if not ipam.is_routed(p)}) > 1:
+            raise HTTPException(400, "Alle IPs eines Servers müssen im selben Modus sein (geroutet bzw. dieselbe Bridge)")
+        ops.check_quota(db, g.owner, ips=len(keep) + len(wanted), exclude_guest=g.id)
+        fixed = [ipam.pool_macs(p).get(a) for p, a in wanted]
+        mac = next((m for m in fixed if m), g.mac)
+        new_rows = []
+        for pool, address in wanted:
+            row = db.scalar(select(IPAddress).where(IPAddress.pool_id == pool.id, IPAddress.address == address)) \
+                or IPAddress(pool_id=pool.id, address=address)
+            row.guest_id, row.reserved, row.note = g.id, False, ""
+            db.add(row)
+            new_rows.append(row)
+        for row in drop:
+            row.guest_id, row.reserved, row.note = None, True, f"wird freigegeben (Umzug #{g.vmid})"
+        db.flush()
+        final = sorted(keep + new_rows, key=lambda r: ipam.version_of(r.pool))
+        first = final[0].pool if final else None
+        routed = bool(first and ipam.is_routed(first))
+        network = {"mac": mac, "hostname": g.hostname, "routed": routed,
+                   "bridge": ipam.ROUTED_BRIDGE if routed else first.bridge if first else ops.default_bridge(target),
+                   "ips": [ipam.ip_spec(r, target) for r in final], "dns": ipam.pool_dns(first)}
+        task = create_task(db, user.id, "migrate", f"{g.name} (#{g.vmid}): {g.node.name} → {target.name}", target.id, g.id)
+        audit(db, user, "guest-migrate", f"#{g.vmid} {g.node.name} -> {target.name}", client_ip(request))
+        db.commit()
+    submit(run_task(task.id, ops.op_migrate(task.id, g.id, target.id, network, [r.id for r in new_rows],
+                                            [r.id for r in drop])))
+    return {"task_id": task.id}
 
 
 class ReinstallBody(BaseModel):

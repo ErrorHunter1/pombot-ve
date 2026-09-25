@@ -19,6 +19,7 @@ from .util import CmdError, check_name, ok, run
 
 log = logging.getLogger("pombot.routed")
 BRIDGE = "pbr0"
+GATEWAY6 = "fe80::1"
 NET_DIR = DATA_DIR / "routed"
 SYSCTL_FILE = Path("/etc/sysctl.d/90-pombot-routed.conf")
 _LOCK = threading.Lock()
@@ -46,10 +47,16 @@ def ensure_bridge() -> None:
         run(["ip", "link", "set", BRIDGE, "type", "bridge", "stp_state", "0", "forward_delay", "0"], check=False)
     run(["ip", "link", "set", BRIDGE, "up"])
     run(["ip", "addr", "replace", f"{main_ip}/32", "dev", BRIDGE])
+    # IPv6: Gäste nutzen fe80::1 als Gateway, der Host beantwortet Nachbar-Anfragen für ihre Adressen (Proxy-NDP)
+    run(["ip", "-6", "addr", "replace", f"{GATEWAY6}/64", "dev", BRIDGE, "nodad"], check=False)
     settings = {
         "net.ipv4.ip_forward": "1",
         f"net.ipv4.conf.{dev}.proxy_arp": "1",
         f"net.ipv4.conf.{BRIDGE}.proxy_arp": "1",
+        # accept_ra=2: Host lernt seine eigene IPv6-Route weiter per Router-Advertisement, obwohl er jetzt weiterleitet
+        f"net.ipv6.conf.{dev}.accept_ra": "2",
+        "net.ipv6.conf.all.forwarding": "1",
+        f"net.ipv6.conf.{dev}.proxy_ndp": "1",
     }
     for key, value in settings.items():
         _sysctl(key, value)
@@ -80,12 +87,12 @@ def allow_forwarding() -> None:
 SKIP_IFACES = ("lo", BRIDGE, "virbr", "lxcbr", "docker", "veth", "vnet", "tap", "br-")
 
 
-def _host_addresses() -> list[dict]:
-    data = json.loads(run(["ip", "-j", "-4", "addr", "show"], timeout=10) or "[]")
+def _host_addresses(family: str = "-4") -> list[dict]:
+    data = json.loads(run(["ip", "-j", family, "addr", "show"], timeout=10) or "[]")
     result = []
     for ifc in data:
         for a in ifc.get("addr_info", []):
-            if a.get("family") == "inet":
+            if a.get("family") in ("inet", "inet6"):
                 result.append({"interface": ifc["ifname"], "address": a["local"], "prefix": a["prefixlen"],
                                "scope": a.get("scope")})
     return result
@@ -124,7 +131,7 @@ def _release_from_host(ips: list[str], job=None) -> None:
     Host sie selbst und leitet nichts an den Gast weiter. Die Haupt-IP bleibt immer unangetastet."""
     main_ip, _ = uplink()
     wanted = set(ips) - {main_ip}
-    for a in _host_addresses():
+    for a in _host_addresses("-4") + _host_addresses("-6"):
         if a["address"] in wanted and a["interface"] != BRIDGE:
             run(["ip", "addr", "del", f"{a['address']}/{a['prefix']}", "dev", a["interface"]], check=False)
             msg = (f"{a['address']} war direkt auf {a['interface']} eingetragen und wurde dort entfernt "
@@ -135,10 +142,15 @@ def _release_from_host(ips: list[str], job=None) -> None:
 
 
 def _routes(ips: list[str], action: str) -> None:
+    _, dev = uplink()
     for ip in ips:
         addr = ipaddress.ip_address(ip)
         if addr.version == 4:
             run(["ip", "route", action, f"{addr}/32", "dev", BRIDGE], check=action == "replace")
+        else:
+            run(["ip", "-6", "route", action, f"{addr}/128", "dev", BRIDGE], check=action == "replace")
+            neigh = "replace" if action == "replace" else "del"
+            run(["ip", "-6", "neigh", neigh, "proxy", str(addr), "dev", dev], check=False)
 
 
 def set_guest(name: str, ips: list[str], job=None) -> None:

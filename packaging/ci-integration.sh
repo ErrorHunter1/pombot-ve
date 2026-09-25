@@ -250,10 +250,11 @@ grep -q "192.0.2.10" /tmp/detect.txt || fail "Erkennung findet die Zusatz-IP nic
 RPOOL="$(api POST /api/pools "{\"name\":\"zusatz\",\"mode\":\"routed\",\"node_id\":$NODE_ID,\"address_list\":\"192.0.2.10, 192.0.2.11\"}")"
 echo "$RPOOL"
 RPOOL_ID="$(echo "$RPOOL" | json 'd["id"]')"
+RPOOL6_ID="$(api POST /api/pools "{\"name\":\"zusatz6\",\"mode\":\"routed\",\"node_id\":$NODE_ID,\"network\":\"2001:db8:99::/64\"}" | json 'd["id"]')"
 end
 
-step "Container im gerouteten Modus"
-RES="$(api POST /api/guests "{\"template_id\":$TPL,\"name\":\"ci-routed\",\"hostname\":\"ci-routed\",\"cores\":1,\"memory_mb\":512,\"disk_gb\":4,\"ipv4_pool\":$RPOOL_ID,\"password\":\"CiTestPasswort1\"}")"
+step "Container im gerouteten Modus (IPv4 + IPv6)"
+RES="$(api POST /api/guests "{\"template_id\":$TPL,\"name\":\"ci-routed\",\"hostname\":\"ci-routed\",\"cores\":1,\"memory_mb\":512,\"disk_gb\":4,\"ipv4_pool\":$RPOOL_ID,\"ipv6_pool\":$RPOOL6_ID,\"password\":\"CiTestPasswort1\"}")"
 echo "$RES"
 RGID="$(echo "$RES" | json 'd["guest_id"]')"
 RVMID="$(echo "$RES" | json 'd["vmid"]')"
@@ -269,6 +270,14 @@ sudo lxc-attach -n "pv$RVMID" -- timeout 10 bash -c 'echo > /dev/tcp/1.1.1.1/443
 echo "Internet aus dem gerouteten Container: OK (TCP 1.1.1.1:443)"
 sudo lxc-attach -n "pv$RVMID" -- test -x /usr/sbin/sshd || fail "SSH im gerouteten Container nicht installiert"
 sudo nft list chain bridge pombot input | grep -q "jump out_pv$RVMID" || fail "Spoofing-Schutz greift im gerouteten Modus nicht"
+IP6="$(api GET "/api/guests/$RGID" | json '[i["address"] for i in d["ips"] if i["version"]==6][0]')"
+echo "IPv6 des Containers: $IP6"
+sudo lxc-attach -n "pv$RVMID" -- ip -6 addr show eth0 | grep -q "$IP6/128" || fail "IPv6 /128 nicht im Container"
+sudo lxc-attach -n "pv$RVMID" -- ip -6 route | tee /dev/stderr | grep -q "default via fe80::1" || fail "IPv6-Default-Route über fe80::1 fehlt"
+ip -6 route show "$IP6" | tee /dev/stderr | grep -q pbr0 || fail "IPv6-Route über pbr0 fehlt"
+ip -6 neigh show proxy | grep -q "$IP6" || fail "Proxy-NDP-Eintrag fehlt"
+ip -6 addr show dev pbr0 | grep -q "fe80::1" || fail "fe80::1 fehlt auf pbr0"
+sudo lxc-attach -n "pv$RVMID" -- ping -6 -c 2 -W 2 fe80::1%eth0 || fail "Container erreicht sein IPv6-Gateway nicht"
 end
 
 step "Geroutet: Löschen entfernt Route"

@@ -111,6 +111,7 @@ Zwei Netzwerk-Modi:
 | Modus | Wann | Wie es funktioniert |
 |---|---|---|
 | **Geroutet** (empfohlen) | Zusatz-IPs ohne eigene MAC-Adresse (skrime, Hetzner, OVH, Netcup …) | Der Node nimmt die IPs per Proxy-ARP entgegen und leitet sie über die interne Bridge `pbr0` weiter. Jeder Server bekommt seine IP als `/32`, Gateway ist automatisch die Haupt-IP des Nodes. Beim Hoster ist nichts einzurichten. |
+| **Geroutet IPv6** | Vom Hoster geroutetes IPv6-Netz (z. B. /64) | Jeder Server bekommt eine /128-Adresse, Gateway `fe80::1`; der Node beantwortet Nachbar-Anfragen (Proxy-NDP). |
 | **Bridge** | Eigenes Netz/VLAN oder Hoster vergibt pro IP eine MAC | Server hängen direkt an einer Bridge (z. B. `vmbr0`) im Netz des Hosters. |
 
 Im gerouteten Modus nimmt PomBot eine Zusatz-IP automatisch von der Netzwerkkarte des Hosts, falls sie dort
@@ -169,6 +170,9 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Snapshots** (erstellen, zurückspielen, löschen) und **Backups** (erstellen, wiederherstellen, löschen)
 - **Zeitgesteuerte Backups** pro Server (täglich/wöchentlich, Uhrzeit, Anzahl aufzubewahrender Backups);
   verpasste Termine werden nachgeholt, pro Node läuft immer nur ein automatisches Backup gleichzeitig
+- **Migration zwischen Nodes:** Server (VM oder Container) per Klick auf einen anderen Node umziehen – die Daten
+  laufen über das Panel, die Nodes müssen sich nicht gegenseitig erreichen; neue IP wählbar, wenn der alte Pool auf
+  dem Ziel nicht verfügbar ist; automatischer Rollback bei Fehlern
 - **Externe Backup-Speicher:** SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2,
   Wasabi, MinIO), NFS und SMB – für manuelle und zeitgesteuerte Backups, Wiederherstellen direkt vom Speicher,
   Verbindungstest im Adminbereich (Einstellungen → Backup-Speicher)
@@ -180,7 +184,7 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Aufgaben** mit Live-Log, **Audit-Protokoll** aller Aktionen
 - Hell-/Dunkelmodus, auch auf dem Handy nutzbar
 
-In Arbeit: Migration zwischen Nodes, gemeinsamer Speicher (NFS/SMB), IPv6-Router-Advertisements, HA.
+In Arbeit: Live-Migration ohne Unterbrechung (bei direkt verbundenen Nodes), gemeinsamer Speicher (NFS/SMB), HA.
 
 ## Entwicklung & Releases
 

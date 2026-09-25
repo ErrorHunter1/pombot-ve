@@ -5,8 +5,10 @@ import io
 import json
 import secrets
 import tarfile
+import time
 from pathlib import Path
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -129,9 +131,11 @@ def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choic
             v6 = pick(v6_choice, 6, node)
         except LookupError:
             continue
-        if v4 and v6 and (ipam.is_routed(v4) or ipam.is_routed(v6)):
-            last_error = "Geroutete IPv4-Pools lassen sich derzeit nicht mit einem IPv6-Pool kombinieren"
+        if v4 and v6 and ipam.is_routed(v4) != ipam.is_routed(v6):
+            last_error = "IPv4- und IPv6-Pool müssen beide geroutet oder beide gebridged sein"
             continue
+        if v4 and v6 and ipam.is_routed(v4):
+            return node, v4, v6
         if v4 and v6 and v4.bridge != v6.bridge:
             last_error = "IPv4- und IPv6-Pool müssen dieselbe Bridge nutzen"
             continue
@@ -341,6 +345,122 @@ async def op_restore(task_id: int, guest_id: int, filename: str, target: dict | 
                 task_log(task_id, "Heruntergeladene Kopie wieder gelöscht.")
             except AgentError:
                 pass
+
+
+async def _wait_stopped(client: AgentClient, name: str, task_id: int, timeout: int = 120) -> None:
+    await client.arequest("POST", f"/guests/{name}/action", {"action": "shutdown"}, timeout=150)
+    for _ in range(timeout // 3):
+        st = await client.arequest("GET", f"/guests/{name}", timeout=30)
+        if st.get("state") == "stopped":
+            return
+        await asyncio.sleep(3)
+    task_log(task_id, "Server reagiert nicht auf Herunterfahren – harter Stopp.")
+    await client.arequest("POST", f"/guests/{name}/action", {"action": "stop"}, timeout=150)
+
+
+async def _relay(task_id: int, src: AgentClient, dst: AgentClient, name: str, total: int) -> int:
+    """Überträgt den Export-Datenstrom der Quelle direkt in den Import des Ziels (durch das Panel)."""
+    sent, last_pct, started = 0, -10, time.time()
+    timeout = httpx.Timeout(None, connect=20)
+    async with httpx.AsyncClient(verify=src.ctx, timeout=timeout) as sc, \
+            httpx.AsyncClient(verify=dst.ctx, timeout=timeout) as dc:
+        async with sc.stream("GET", f"{src.base}/guests/{name}/export", headers=src.headers) as resp:
+            if resp.status_code >= 400:
+                await resp.aread()
+                raise AgentError(f"Export: {resp.text[:300]}")
+
+            async def body():
+                nonlocal sent, last_pct
+                async for chunk in resp.aiter_raw():
+                    sent += len(chunk)
+                    pct = int(sent * 100 / total) if total else 0
+                    if pct >= last_pct + 10:
+                        last_pct = pct - pct % 10
+                        rate = sent / max(time.time() - started, 1) / (1 << 20)
+                        task_log(task_id, f"Übertragen: {sent >> 20} MiB (~{min(pct, 100)} %, {rate:.1f} MiB/s)")
+                    yield chunk
+
+            r = await dc.put(f"{dst.base}/guests/{name}/import", headers=dst.headers, content=body())
+            if r.status_code >= 400:
+                try:
+                    detail = r.json().get("detail", r.text)
+                except ValueError:
+                    detail = r.text
+                raise AgentError(f"Import: {detail}")
+    return sent
+
+
+async def op_migrate(task_id: int, guest_id: int, target_node_id: int, network: dict, new_ids: list[int],
+                     drop_ids: list[int]) -> None:
+    """Server auf einen anderen Node umziehen: herunterfahren, übertragen, Netzwerk anpassen, starten, alt löschen."""
+    with session_scope() as db:
+        g = db.get(Guest, guest_id)
+        src, dst = AgentClient.for_node(g.node), AgentClient.for_node(db.get(Node, target_node_id))
+        name, src_name, dst_name = g.agent_name, g.node.name, db.get(Node, target_node_id).name
+        was_running = g.power == "running"
+    _set_guest(guest_id, status="busy")
+    imported = False
+    try:
+        task_log(task_id, f"Umzug von {src_name} nach {dst_name}.")
+        if was_running:
+            task_log(task_id, "Fahre Server herunter …")
+            await _wait_stopped(src, name, task_id)
+        info = await src.arequest("GET", f"/guests/{name}/export/info")
+        if info.get("kvm_snapshots"):
+            task_log(task_id, f"Hinweis: {info['kvm_snapshots']} Snapshot(s) der VM werden nicht mit umgezogen.")
+        task_log(task_id, f"Übertrage ca. {info['size'] >> 20} MiB …")
+        sent = await _relay(task_id, src, dst, name, info["size"])
+        imported = True
+        task_log(task_id, f"Übertragung abgeschlossen ({sent >> 20} MiB). Richte Netzwerk auf {dst_name} ein …")
+        await agent_job(task_id, dst, "POST", f"/guests/{name}/network", network)
+        with session_scope() as db:
+            g = db.get(Guest, guest_id)
+            g.node_id, g.mac = target_node_id, network["mac"]
+            for rid in drop_ids:
+                row = db.get(IPAddress, rid)
+                if row:
+                    db.delete(row)
+        from .routers.extras import push_firewall
+        try:
+            await asyncio.to_thread(push_firewall, guest_id)
+        except Exception as exc:  # noqa: BLE001
+            task_log(task_id, f"WARNUNG: Firewall auf {dst_name} nicht gesetzt: {exc}")
+        if was_running:
+            state = (await dst.arequest("POST", f"/guests/{name}/action", {"action": "start"}, timeout=150))["state"]
+            _set_guest(guest_id, power=state)
+            task_log(task_id, f"Server läuft auf {dst_name}.")
+        else:
+            _set_guest(guest_id, power="stopped")
+        task_log(task_id, f"Entferne alte Kopie auf {src_name} …")
+        try:
+            await agent_job(task_id, src, "DELETE", f"/guests/{name}")
+        except AgentError as exc:
+            task_log(task_id, f"WARNUNG: Alte Kopie auf {src_name} konnte nicht gelöscht werden: {exc}")
+    except Exception:
+        task_log(task_id, "Fehler – mache den Umzug rückgängig …")
+        if imported:
+            try:
+                await agent_job(task_id, dst, "DELETE", f"/guests/{name}")
+            except AgentError:
+                task_log(task_id, f"WARNUNG: Teilweise importierte Kopie auf {dst_name} bitte prüfen.")
+        with session_scope() as db:
+            for rid in new_ids:
+                row = db.get(IPAddress, rid)
+                if row:
+                    db.delete(row)
+            for rid in drop_ids:
+                row = db.get(IPAddress, rid)
+                if row:
+                    row.guest_id, row.reserved, row.note = guest_id, False, ""
+        if was_running:
+            try:
+                await src.arequest("POST", f"/guests/{name}/action", {"action": "start"}, timeout=150)
+                task_log(task_id, f"Server läuft wieder auf {src_name}.")
+            except AgentError:
+                pass
+        raise
+    finally:
+        _set_guest(guest_id, status="ready")
 
 
 # ---------------------------------------------------------------- Nodes

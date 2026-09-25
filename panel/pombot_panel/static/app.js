@@ -482,7 +482,7 @@ function taskRows(tasks) {
 const TASK_LABELS = {
   create: "Erstellen", delete: "Löschen", reinstall: "Neu installieren", resize: "Ressourcen ändern",
   snapshot: "Snapshot", "snapshot-delete": "Snapshot löschen", "snapshot-rollback": "Snapshot zurückspielen",
-  network: "Netzwerk ändern", domain: "Domain & Zertifikat", "iso-fetch": "ISO laden", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
+  network: "Netzwerk ändern", domain: "Domain & Zertifikat", "iso-fetch": "ISO laden", migrate: "Umzug", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
 };
 
 async function viewDashboard(params, m, silent, seq) {
@@ -1089,6 +1089,9 @@ async function guestSettings(g, shell) {
       <div class="card"><div class="card-head"><h2>root-Passwort zurücksetzen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Erzeugt ein neues zufälliges Passwort und setzt es im laufenden System${g.type === "kvm" ? " (über den qemu-guest-agent)" : ""}.</p>
         <button class="btn" data-act="resetPw" ${g.status === "ready" && g.power === "running" ? "" : "disabled"}>Neues Passwort erzeugen</button></div></div>
+      ${admin ? `<div class="card"><div class="card-head"><h2>Auf anderen Node umziehen</h2></div><div class="card-body">
+        <p class="muted" style="margin-top:0">Der Server wird heruntergefahren, über das Panel auf den neuen Node übertragen, dort eingerichtet und wieder gestartet. Die Unterbrechung dauert je nach Festplattengröße einige Minuten.</p>
+        <button class="btn" data-act="migrate" ${["ready", "error"].includes(g.status) ? "" : "disabled"}>Umziehen …</button></div></div>` : ""}
       <div class="card"><div class="card-head"><h2>Neu installieren</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Setzt den Server mit einem frischen Betriebssystem neu auf. IP-Adressen bleiben erhalten, <strong>alle Daten werden gelöscht</strong>.</p>
         <div class="row"><select id="reinstall-tpl">${templates.filter((t) => t.type === g.type).map((t) => `<option value="${t.id}" ${t.id === g.template_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>
@@ -1111,6 +1114,47 @@ async function guestSettings(g, shell) {
     if (!(await confirmBox("Passwort zurücksetzen?", "Das bisherige root-Passwort funktioniert danach nicht mehr.", { ok: "Zurücksetzen" }))) return;
     const r = await api(`/api/guests/${g.id}/password`, { method: "POST", body: {} });
     showSecret("Neues root-Passwort", `Benutzer <code>root</code> auf <strong>${esc(g.name)}</strong>:`, r.password);
+  };
+  S.handlers.migrate = async () => {
+    const [nodes, pools] = await Promise.all([api("/api/nodes"), api("/api/pools")]);
+    const targets = nodes.filter((n) => n.id !== g.node_id && n.status === "online");
+    if (!targets.length) return toast("Kein anderer Node online", "bad");
+    const m = modal({
+      title: `${g.name} umziehen`, wide: true,
+      body: `<label class="field"><span>Ziel-Node</span><select id="mg-node">${targets.map((n) => `<option value="${n.id}">${esc(n.name)} – ${fmtMB(Math.max(0, Math.round((n.info.memory_total || 0) / 1048576) - n.committed_memory_mb))} RAM frei</option>`).join("")}</select></label>
+        <div id="mg-net"></div><div class="alert bad hidden" id="mg-err"></div>`,
+      foot: `<button class="btn" data-close>Abbrechen</button><button class="btn primary" id="mg-go">Umzug starten</button>`,
+    });
+    const renderNet = async () => {
+      const nodeId = +$("#mg-node", m).value;
+      const chk = await api(`/api/guests/${g.id}/migrate/check?node_id=${nodeId}`);
+      const row = (v) => {
+        const cur = chk.ips.find((i) => i.version === v);
+        const avail = pools.filter((p) => p.version === v && (!p.node_id || p.node_id === nodeId));
+        const keepOk = !cur || cur.usable;
+        return `<label class="field"><span>IPv${v}</span><select id="mg-pool${v}">
+          ${keepOk ? `<option value="keep">${cur ? `Behalten (${esc(cur.address)})` : "Keine (wie bisher)"}</option>` : ""}
+          ${avail.map((p) => `<option value="${p.id}">Neue IP aus ${esc(p.name)} (${p.mode === "routed" ? "geroutet" : "Bridge"}) – ${p.size - p.used} frei</option>`).join("")}
+          <option value="none">${v === 4 ? "Keine feste IPv4 (DHCP)" : "Keine IPv6"}</option></select>
+          ${!keepOk ? `<div class="hint" style="color:var(--warn)">${esc(cur.address)} (Pool ${esc(cur.pool)}) ist auf dem Ziel-Node nicht nutzbar – bitte neue IP wählen.</div>` : ""}</label>`;
+      };
+      $("#mg-net", m).innerHTML = row(4) + row(6);
+    };
+    $("#mg-node", m).onchange = () => renderNet().catch(fail);
+    await renderNet();
+    $("#mg-go", m).onclick = async () => {
+      const num = (v) => (/^\d+$/.test(v) ? +v : v);
+      const body = { node_id: +$("#mg-node", m).value, ipv4_pool: num($("#mg-pool4", m).value), ipv6_pool: num($("#mg-pool6", m).value) };
+      try {
+        const r = await api(`/api/guests/${g.id}/migrate`, { method: "POST", body });
+        m.close();
+        await watchTask(r.task_id, `${g.name} umziehen`);
+        route();
+      } catch (e) {
+        $("#mg-err", m).textContent = e.message;
+        $("#mg-err", m).classList.remove("hidden");
+      }
+    };
   };
   S.handlers.reinstall = async () => {
     if (!(await confirmBox("Server neu installieren?", "Alle Daten auf dem Server werden unwiderruflich gelöscht.", { danger: true, ok: "Neu installieren", requireText: g.vmid }))) return;
@@ -1729,7 +1773,7 @@ function poolDialog(pool, nodes) {
         const routed = st.mode === "routed", list = st.source === "list";
         const n = nodeName();
         $("#mode-hint", mm).innerHTML = routed
-          ? `Für Zusatz-IPs ohne eigene MAC-Adresse (z. B. skrime, Hetzner, OVH). Der Node leitet die IPs an die Server weiter; jeder Server bekommt seine IP als /32 mit Gateway <code>${esc((n && n.info && n.info.main_ipv4) || "Haupt-IP des Nodes")}</code>. Beim Hoster muss nichts eingerichtet werden.`
+          ? `Für Zusatz-IPs ohne eigene MAC-Adresse (z. B. skrime, Hetzner, OVH). Der Node leitet die IPs an die Server weiter; jeder Server bekommt seine IP als /32 mit Gateway <code>${esc((n && n.info && n.info.main_ipv4) || "Haupt-IP des Nodes")}</code> – bzw. IPv6 als /128 mit Gateway <code>fe80::1</code> (z. B. aus einem gerouteten /64). Beim Hoster muss nichts eingerichtet werden.`
           : "Server hängen direkt im Netz des Hosters. Nur nutzen, wenn du ein eigenes Netz/VLAN hast oder der Hoster für jede IP eine eigene MAC-Adresse vergibt.";
         $("#src-list", mm).classList.toggle("hidden", !list);
         $("#net-fields", mm).classList.toggle("hidden", routed && list);
