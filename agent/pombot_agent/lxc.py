@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import netcfg
 from .config import BACKUP_DIR, GUEST_DIR, LXC_BACKEND, LXC_KEYSERVER, LXC_PATH, LXC_UNPRIVILEGED
-from .util import CmdError, check_name, check_snap, run
+from .util import CmdError, check_name, check_snap, ok, run
 
 _cpu_prev: dict[str, tuple[float, int]] = {}
 ATTACH = ["--clear-env", "--set-var", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -104,6 +104,22 @@ def _stop(name: str, job=None, timeout: int = 60) -> None:
         run(["lxc-stop", "-n", name, "-t", str(timeout)], job=job, check=False, timeout=timeout + 30)
         if state(name) != "stopped":
             run(["lxc-stop", "-n", name, "-k"], job=job, check=False)
+    _wait_released(name)
+
+
+def _wait_released(name: str, timeout: int = 60) -> None:
+    """Wartet, bis lxc-start beendet und die Loop-Disk ausgehängt ist. Erst dann darf die
+    Disk kopiert werden, sonst ändert sie sich noch während des Lesens."""
+    unit = f"pombot-lxc-{name}"
+    kind, path = _rootfs(name)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        unit_active = ok(["systemctl", "is-active", "--quiet", unit])
+        loop_busy = kind == "loop" and bool(run(["losetup", "-j", path], check=False).strip())
+        if not unit_active and not loop_busy:
+            break
+        time.sleep(1)
+    run(["sync"], check=False)
 
 
 # ---------------------------------------------------------------- Anlegen
