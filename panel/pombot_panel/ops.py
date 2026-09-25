@@ -87,14 +87,16 @@ def usable_pools(db: Session, user: User, node: Node, version: int) -> list[IPPo
     return pools
 
 
-def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choice, v6_choice):
+def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choice, v6_choice,
+                      storage_id: int | None = None):
     """Liefert (node, v4_pool|None, v6_pool|None). choice: 'auto' | 'none' | <id>"""
+    from .cluster import mounted_on
     if node_choice in (None, "", "auto"):
         nodes = [n for n in db.scalars(select(Node).where(Node.status == "online", Node.enabled.is_(True)))
-                 if node_supports(n, gtype)]
+                 if node_supports(n, gtype) and (not storage_id or mounted_on(n.id, storage_id))]
         nodes.sort(key=node_free_memory_mb, reverse=True)
         if not nodes:
-            raise HTTPException(400, "Kein passender Node online")
+            raise HTTPException(400, "Kein passender Node online" + (" (mit eingehängtem Speicher)" if storage_id else ""))
     else:
         node = db.get(Node, int(node_choice))
         if not node:
@@ -105,6 +107,8 @@ def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choic
             raise HTTPException(400, f"Node {node.name} ist nicht online")
         if not node_supports(node, gtype):
             raise HTTPException(400, f"Node {node.name} unterstützt {gtype.upper()} nicht")
+        if storage_id and not mounted_on(node.id, storage_id):
+            raise HTTPException(400, f"Der gewählte Speicher ist auf Node {node.name} nicht eingehängt")
         nodes = [node]
 
     def pick(choice, version, node):
@@ -190,6 +194,8 @@ def build_spec(db: Session, guest: Guest, template: Template | None, password: s
         "ssh_keys": ssh_keys,
         "instance_suffix": suffix,
     }
+    if guest.storage_id:
+        spec["storage_id"] = str(guest.storage_id)
     if template is None:
         if not guest.iso_file:
             raise AgentError("Server hat weder Vorlage noch ISO")
@@ -391,27 +397,39 @@ async def _relay(task_id: int, src: AgentClient, dst: AgentClient, name: str, to
 
 
 async def op_migrate(task_id: int, guest_id: int, target_node_id: int, network: dict, new_ids: list[int],
-                     drop_ids: list[int]) -> None:
-    """Server auf einen anderen Node umziehen: herunterfahren, übertragen, Netzwerk anpassen, starten, alt löschen."""
+                     drop_ids: list[int], shared: bool = False) -> None:
+    """Server auf einen anderen Node umziehen: herunterfahren, übertragen, Netzwerk anpassen, starten, alt löschen.
+    shared=True: der Server liegt auf gemeinsamem Speicher – dann wird er nur abgemeldet und auf dem Ziel
+    registriert, ohne Daten zu kopieren."""
     with session_scope() as db:
         g = db.get(Guest, guest_id)
         src, dst = AgentClient.for_node(g.node), AgentClient.for_node(db.get(Node, target_node_id))
         name, src_name, dst_name = g.agent_name, g.node.name, db.get(Node, target_node_id).name
         was_running = g.power == "running"
+        adopt = {"type": g.type, "storage_id": str(g.storage_id or ""), "ha": g.ha}
+        src_id, old_mac = g.node_id, g.mac
     _set_guest(guest_id, status="busy")
-    imported = False
+    imported = released = False
     try:
         task_log(task_id, f"Umzug von {src_name} nach {dst_name}.")
         if was_running:
             task_log(task_id, "Fahre Server herunter …")
             await _wait_stopped(src, name, task_id)
-        info = await src.arequest("GET", f"/guests/{name}/export/info")
-        if info.get("kvm_snapshots"):
-            task_log(task_id, f"Hinweis: {info['kvm_snapshots']} Snapshot(s) der VM werden nicht mit umgezogen.")
-        task_log(task_id, f"Übertrage ca. {info['size'] >> 20} MiB …")
-        sent = await _relay(task_id, src, dst, name, info["size"])
-        imported = True
-        task_log(task_id, f"Übertragung abgeschlossen ({sent >> 20} MiB). Richte Netzwerk auf {dst_name} ein …")
+        if shared:
+            task_log(task_id, "Server liegt auf gemeinsamem Speicher – es werden keine Daten kopiert.")
+            await src.arequest("POST", f"/guests/{name}/release", timeout=60)
+            released = True
+            await dst.arequest("POST", f"/guests/{name}/adopt", adopt, timeout=120)
+            imported = True
+            task_log(task_id, f"Auf {dst_name} registriert. Richte Netzwerk ein …")
+        else:
+            info = await src.arequest("GET", f"/guests/{name}/export/info")
+            if info.get("kvm_snapshots"):
+                task_log(task_id, f"Hinweis: {info['kvm_snapshots']} Snapshot(s) der VM werden nicht mit umgezogen.")
+            task_log(task_id, f"Übertrage ca. {info['size'] >> 20} MiB …")
+            sent = await _relay(task_id, src, dst, name, info["size"])
+            imported = True
+            task_log(task_id, f"Übertragung abgeschlossen ({sent >> 20} MiB). Richte Netzwerk auf {dst_name} ein …")
         await agent_job(task_id, dst, "POST", f"/guests/{name}/network", network)
         with session_scope() as db:
             g = db.get(Guest, guest_id)
@@ -431,14 +449,25 @@ async def op_migrate(task_id: int, guest_id: int, target_node_id: int, network: 
             task_log(task_id, f"Server läuft auf {dst_name}.")
         else:
             _set_guest(guest_id, power="stopped")
-        task_log(task_id, f"Entferne alte Kopie auf {src_name} …")
-        try:
-            await agent_job(task_id, src, "DELETE", f"/guests/{name}")
-        except AgentError as exc:
-            task_log(task_id, f"WARNUNG: Alte Kopie auf {src_name} konnte nicht gelöscht werden: {exc}")
+        if not shared:
+            task_log(task_id, f"Entferne alte Kopie auf {src_name} …")
+            try:
+                await agent_job(task_id, src, "DELETE", f"/guests/{name}")
+            except AgentError as exc:
+                task_log(task_id, f"WARNUNG: Alte Kopie auf {src_name} konnte nicht gelöscht werden: {exc}")
     except Exception:
         task_log(task_id, "Fehler – mache den Umzug rückgängig …")
-        if imported:
+        _set_guest(guest_id, node_id=src_id, mac=old_mac)
+        if shared:
+            # niemals DELETE: das würde die Daten auf dem gemeinsamen Speicher löschen
+            try:
+                if imported:
+                    await dst.arequest("POST", f"/guests/{name}/release", timeout=60)
+                if released:
+                    await src.arequest("POST", f"/guests/{name}/adopt", adopt, timeout=120)
+            except AgentError as exc:
+                task_log(task_id, f"WARNUNG: Rückgängig machen unvollständig ({exc}) – bitte Server auf {src_name} prüfen.")
+        elif imported:
             try:
                 await agent_job(task_id, dst, "DELETE", f"/guests/{name}")
             except AgentError:

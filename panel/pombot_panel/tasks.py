@@ -115,7 +115,8 @@ def mark_stale_tasks() -> None:
 
 # ---------------------------------------------------------------- Poller
 
-async def _poll_node(node_id: int, client: AgentClient, refresh_info: bool) -> None:
+async def _poll_node(node_id: int, client: AgentClient, refresh_info: bool, sync: bool = False) -> None:
+    from . import cluster
     try:
         stats = await client.arequest("GET", "/host/stats", timeout=10)
         guests = await client.arequest("GET", "/guests", timeout=20)
@@ -126,6 +127,7 @@ async def _poll_node(node_id: int, client: AgentClient, refresh_info: bool) -> N
             node = db.get(Node, node_id)
             if node and node.status != "offline":
                 log.warning("Node %s offline: %s", node.name, exc)
+                cluster.node_went_offline(db, node)
                 node.status = "offline"
             for guest in db.scalars(select(Guest).where(Guest.node_id == node_id)):
                 guest.power = "unknown"
@@ -137,6 +139,7 @@ async def _poll_node(node_id: int, client: AgentClient, refresh_info: bool) -> N
         node = db.get(Node, node_id)
         if not node:
             return
+        came_back = node.status != "online"
         node.status = "online"
         node.last_seen = now()
         if info:
@@ -146,6 +149,18 @@ async def _poll_node(node_id: int, client: AgentClient, refresh_info: bool) -> N
             if guest.status in GUEST_BUSY_STATES:
                 continue
             guest.power = entry["state"] if entry else "missing"
+    if sync or came_back or node_id not in cluster.STATUS:
+        try:
+            await cluster.sync_node(node_id, client)
+        except AgentError as exc:
+            cluster.STATUS.setdefault(node_id, {})  # z. B. ältere Agent-Version: nicht jede Runde neu versuchen
+            log.debug("Speicher/HA-Abgleich mit Node %s: %s", node_id, exc)
+    try:
+        await cluster.cleanup_stale(node_id, client, guests)
+        if came_back:
+            await cluster.restart_returned(node_id, guests)
+    except Exception:  # noqa: BLE001
+        log.exception("HA-Nacharbeit für Node %s fehlgeschlagen", node_id)
 
 
 async def poll_loop() -> None:
@@ -155,7 +170,9 @@ async def poll_loop() -> None:
             with session_scope() as db:
                 nodes = [(n.id, AgentClient.for_node(n)) for n in db.scalars(select(Node))]
             refresh = counter % 30 == 0
-            await asyncio.gather(*(_poll_node(nid, client, refresh) for nid, client in nodes))
+            await asyncio.gather(*(_poll_node(nid, client, refresh, counter % 6 == 0) for nid, client in nodes))
+            from . import cluster
+            await cluster.ha_check()
         except Exception:  # noqa: BLE001
             log.exception("Poller-Fehler")
         counter += 1

@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-from . import cloudinit, images, isos
+from . import cloudinit, images, isos, storage
 from .config import BACKUP_DIR, GUEST_DIR, KVM_CPU, KVM_SERIAL
 from .util import CmdError, check_name, check_snap, ok, run
 
@@ -156,9 +156,10 @@ def create(job, spec: dict) -> dict:
     name = check_name(spec["name"])
     if exists(name):
         raise CmdError(f"VM {name} existiert bereits")
-    d = _guest_dir(name)
-    d.mkdir(parents=True, exist_ok=True)
+    d = storage.prepare_guest_dir(spec.get("storage_id"), name)  # lokal oder auf gemeinsamem Speicher
     os.chmod(d, 0o755)
+    if spec.get("storage_id"):
+        job.write(f"Festplatte liegt auf gemeinsamem Speicher: {d}")
     disk = d / "disk.qcow2"
     size_gb = int(spec["disk_gb"])
     try:
@@ -197,7 +198,7 @@ def _remove(name: str) -> None:
     if exists(name):
         run(["virsh", "destroy", name], check=False)
         run(["virsh", "undefine", name, "--snapshots-metadata", "--managed-save"], check=False)
-    shutil.rmtree(_guest_dir(name), ignore_errors=True)
+    storage.remove_guest_dirs(name)
 
 
 def delete(job, name: str) -> dict:
@@ -524,7 +525,8 @@ def restore(job, name: str, archive: Path) -> dict:
             shutil.move(str(stage / "seed.iso"), d / "seed.iso")
         shutil.move(str(stage / "domain.xml"), d / "domain.xml")
         run(["virsh", "define", d / "domain.xml"], job=job)
-        run(["virsh", "autostart", name], check=False)
+        from . import ha
+        run(["virsh", "autostart", name] + (["--disable"] if name in ha.ha_guests() else []), check=False)
         run(["virsh", "start", name], job=job)
     finally:
         shutil.rmtree(stage, ignore_errors=True)

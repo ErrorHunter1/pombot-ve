@@ -30,15 +30,16 @@ def _sources(name: str) -> tuple[str, list[tuple[Path, str]], int]:
     if lxc.exists(name):
         if lxc.state(name) != "stopped":
             raise CmdError("Der Container muss gestoppt sein")
-        dirs = [(LXC_PATH / name, f"lxc/{name}")]
+        # resolve(): bei Servern auf gemeinsamem Speicher den Inhalt statt des Symlinks exportieren
+        dirs = [((LXC_PATH / name).resolve(), f"lxc/{name}")]
         if (GUEST_DIR / name).exists():
-            dirs.append((GUEST_DIR / name, f"extra/{name}"))
+            dirs.append(((GUEST_DIR / name).resolve(), f"extra/{name}"))
         gtype = "lxc"
     elif kvm.exists(name):
         if kvm.state(name) != "stopped":
             raise CmdError("Die VM muss gestoppt sein")
         (GUEST_DIR / name / "domain.xml").write_text(run(["virsh", "dumpxml", "--inactive", name]))
-        dirs = [(GUEST_DIR / name, f"kvm/{name}")]
+        dirs = [((GUEST_DIR / name).resolve(), f"kvm/{name}")]
         gtype = "kvm"
     else:
         raise CmdError("Server nicht gefunden")
@@ -56,7 +57,8 @@ def _sources(name: str) -> tuple[str, list[tuple[Path, str]], int]:
 def export_info(name: str) -> dict:
     gtype, _, size = _sources(name)
     snaps = kvm.snapshots(name) if gtype == "kvm" else []
-    return {"type": gtype, "size": size, "kvm_snapshots": len(snaps)}
+    from . import storage
+    return {"type": gtype, "size": size, "kvm_snapshots": len(snaps), "storage": storage.guest_storage(name)}
 
 
 async def _run_tar(args: list[str]):
@@ -86,8 +88,10 @@ async def export_stream(name: str):
             yield chunk
         for src, arc in dirs:
             # jedes Verzeichnis als eigenes Archiv, damit die Umbenennung eindeutig bleibt
-            args = ["tar", "--numeric-owner", "--sparse", "-cf", "-",
+            args = ["tar", "--numeric-owner", "--sparse", "-cf", "-", "--exclude", ".pombot-lease*",
                     "--transform", f"s,^{src.name}(/|$),{arc}\\1,x", "-C", str(src.parent), src.name]
+            if arc.startswith("extra/"):
+                args[5:5] = ["--exclude", f"{src.name}/lxc"]  # Container liegt schon im lxc/-Teil
             async for chunk in _run_tar(args):
                 yield chunk
     finally:

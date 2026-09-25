@@ -176,6 +176,14 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Externe Backup-Speicher:** SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2,
   Wasabi, MinIO), NFS und SMB – für manuelle und zeitgesteuerte Backups, Wiederherstellen direkt vom Speicher,
   Verbindungstest im Adminbereich (Einstellungen → Backup-Speicher)
+- **Gemeinsamer Speicher:** NFS, SMB oder ein vorhandener Mount (z. B. CephFS, GlusterFS) wird auf allen Nodes
+  eingehängt (Einstellungen → Gemeinsamer Speicher). Server darauf ziehen ohne Kopieren in Sekunden auf einen
+  anderen Node um.
+- **Hochverfügbarkeit (HA):** Für Server auf gemeinsamem Speicher einschaltbar. Fällt ihr Node länger als 2 Minuten
+  aus, startet das Panel sie automatisch auf einem anderen Node mit demselben Speicher und passenden IP-Pools.
+  Schutz vor doppelt laufenden Servern über Leases auf dem Speicher: Ein Node, der den Speicher 30 s lang nicht
+  beschreiben kann, stoppt seine HA-Server selbst; übernommen wird erst, wenn die Lease abgelaufen ist.
+  Kommt der alte Node zurück, wird der Server dort nur abgemeldet.
 - **Firewall pro Server** (nftables auf dem Node): Regeln für ein-/ausgehend, TCP/UDP/ICMP, Ports und
   Portbereiche, Quell-/Zielnetze, Standardaktion, Vorlagen für SSH/Web/Ping/DNS/Mail
 - **Spoofing-Schutz**: Server können nur mit ihren eigenen IP-Adressen senden (standardmäßig immer aktiv)
@@ -184,7 +192,7 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Aufgaben** mit Live-Log, **Audit-Protokoll** aller Aktionen
 - Hell-/Dunkelmodus, auch auf dem Handy nutzbar
 
-In Arbeit: Live-Migration ohne Unterbrechung (bei direkt verbundenen Nodes), gemeinsamer Speicher (NFS/SMB), HA.
+In Arbeit: Live-Migration ohne Unterbrechung (bei direkt verbundenen Nodes).
 
 ## Entwicklung & Releases
 

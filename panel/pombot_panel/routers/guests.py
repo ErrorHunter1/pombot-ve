@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect as ws_connect
 
-from .. import backup_targets, ipam, ops
+from .. import backup_targets, cluster, ipam, ops
 from ..agent_client import AgentClient, AgentError
 from ..db import SessionLocal, get_db, session_scope
 from ..models import Guest, IPAddress, IPPool, Node, Template, User
@@ -36,6 +36,7 @@ def guest_dict(g: Guest) -> dict:
         "status": g.status, "power": g.power, "error": g.error, "notes": g.notes,
         "created_at": g.created_at.isoformat() + "Z",
         "ips": [_ip_view(ip, g) for ip in g.ips],
+        "storage_id": g.storage_id, "storage": g.storage.name if g.storage else None, "ha": g.ha,
     }
 
 
@@ -109,6 +110,7 @@ class CreateBody(BaseModel):
     password: str | None = Field(default=None, max_length=128)
     ssh_keys: str = ""
     owner_id: int | None = None
+    storage_id: int | None = None  # gemeinsamer Speicher (None = lokal auf dem Node)
 
 
 @router.post("")
@@ -148,10 +150,12 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
             raise HTTPException(400, "Besitzer nicht gefunden")
     password = body.password or generate_password()
     keys = _keys(body.ssh_keys) or _keys(owner.ssh_keys)
+    storage = cluster.get_visible(db, user, body.storage_id)
 
     with ipam.alloc_lock:
         node, v4, v6 = ops.resolve_placement(db, owner if not user.is_admin else user, gtype,
-                                             body.node, body.ipv4_pool, body.ipv6_pool)
+                                             body.node, body.ipv4_pool, body.ipv6_pool,
+                                             storage.id if storage else None)
         pools = [p for p in (v4, v6) if p]
         ops.check_quota(db, owner, guests=1, cores=body.cores, memory_mb=body.memory_mb,
                         disk_gb=body.disk_gb, ips=len(pools))
@@ -159,7 +163,7 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
                       type=gtype, node_id=node.id, owner_id=owner.id,
                       template_id=template.id if template else None, iso_file=body.iso_file,
                       cores=body.cores, memory_mb=body.memory_mb, disk_gb=body.disk_gb, mac=ops.new_mac(db),
-                      status="creating", power="unknown")
+                      storage_id=storage.id if storage else None, status="creating", power="unknown")
         db.add(guest)
         db.flush()
         for pool in pools:
@@ -187,6 +191,7 @@ class PatchBody(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     notes: str | None = Field(default=None, max_length=10000)
     owner_id: int | None = None
+    ha: bool | None = None
 
 
 @router.patch("/{guest_id}")
@@ -204,6 +209,18 @@ def patch_guest(guest_id: int, body: PatchBody, request: Request, user: User = D
             raise HTTPException(400, "Benutzer nicht gefunden")
         audit(db, user, "guest-owner", f"#{g.vmid} -> Benutzer {body.owner_id}", client_ip(request))
         g.owner_id = body.owner_id
+    if body.ha is not None and body.ha != g.ha:
+        if not user.is_admin:
+            raise HTTPException(403, "Nur Administratoren können HA ein- oder ausschalten")
+        if body.ha and not g.storage_id:
+            raise HTTPException(400, "HA geht nur für Server auf gemeinsamem Speicher")
+        g.ha = body.ha
+        audit(db, user, "guest-ha", f"#{g.vmid} {'an' if body.ha else 'aus'}", client_ip(request))
+        db.commit()
+        try:
+            cluster.sync_node_now(g.node_id)
+        except AgentError as exc:
+            raise HTTPException(502, f"Gespeichert, aber Node nicht erreichbar: {exc}")
     db.commit()
     return guest_dict(g)
 
@@ -448,7 +465,9 @@ def migrate_check(guest_id: int, node_id: int, user: User = Depends(current_user
     if not node:
         raise HTTPException(404, "Node nicht gefunden")
     return {"ips": [{"address": ip.address, "pool": ip.pool.name, "version": ipam.version_of(ip.pool),
-                     "usable": ops.pool_fits_node(ip.pool, node)} for ip in g.ips]}
+                     "usable": ops.pool_fits_node(ip.pool, node)} for ip in g.ips],
+            "shared": bool(g.storage_id and cluster.mounted_on(node.id, g.storage_id)),
+            "storage": g.storage.name if g.storage else None}
 
 
 @router.post("/{guest_id}/migrate")
@@ -467,6 +486,8 @@ def migrate_guest(guest_id: int, body: MigrateBody, request: Request, user: User
         raise HTTPException(400, f"Node {target.name} unterstützt {'VMs' if g.type == 'kvm' else 'Container'} nicht")
     if g.power == "missing":
         raise HTTPException(400, "Server auf dem aktuellen Node nicht gefunden")
+    if g.storage_id and not cluster.mounted_on(target.id, g.storage_id):
+        raise HTTPException(400, f"Speicher {g.storage.name} ist auf {target.name} nicht eingehängt")
     with ipam.alloc_lock:
         keep, drop, wanted = [], [], []
         choices = ((4, body.ipv4_pool, body.ipv4_address), (6, body.ipv6_pool, body.ipv6_address))
@@ -508,7 +529,7 @@ def migrate_guest(guest_id: int, body: MigrateBody, request: Request, user: User
         audit(db, user, "guest-migrate", f"#{g.vmid} {g.node.name} -> {target.name}", client_ip(request))
         db.commit()
     submit(run_task(task.id, ops.op_migrate(task.id, g.id, target.id, network, [r.id for r in new_rows],
-                                            [r.id for r in drop])))
+                                            [r.id for r in drop], shared=bool(g.storage_id))))
     return {"task_id": task.id}
 
 

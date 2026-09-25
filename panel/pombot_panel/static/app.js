@@ -643,6 +643,7 @@ async function guestOverview(g, shell, seq) {
           <dt>Ressourcen</dt><dd>${g.cores} CPU · ${fmtMB(g.memory_mb)} RAM · ${g.disk_gb} GB</dd>
           <dt>Betriebssystem</dt><dd>${esc(g.template || "–")}</dd>
           <dt>Node</dt><dd>${esc(g.node)}</dd>
+          <dt>Festplatte</dt><dd>${g.storage ? `${esc(g.storage)} (gemeinsam)${g.ha ? ` ${badge("HA", "good")}` : ""}` : "lokal auf dem Node"}</dd>
           <dt>Erstellt</dt><dd>${fmtDate(g.created_at)}</dd>
           ${ssh ? `<dt>SSH</dt><dd><code>${esc(ssh)}</code> <button class="btn sm" data-copy="${esc(ssh)}">Kopieren</button></dd>` : ""}
         </dl>
@@ -980,6 +981,73 @@ async function settingsBackupTargets(head) {
       Unterstützt: SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2, Wasabi, MinIO), NFS und SMB.</div>`}</div>`);
 }
 
+// ------------------------------------------------------------------ Gemeinsamer Speicher (Einstellungen)
+
+const STORAGE_FIELDS = {
+  nfs: [["server", "Server", "nas.local"], ["export", "Export", "/srv/pombot"], ["options", "Mount-Optionen (optional)", "vers=4,hard,timeo=600,retrans=5"]],
+  smb: [["share", "Freigabe", "//nas.local/pombot"], ["user", "Benutzer", ""], ["password", "Passwort", "", "secret"], ["domain", "Domäne (optional)", ""], ["version", "SMB-Version", "3.0"]],
+  path: [["path", "Pfad (auf allen Nodes gleich eingehängt)", "/mnt/cephfs/pombot"]],
+};
+
+function storageDialog(t) {
+  const cfg = t ? t.config : {};
+  const fieldsHtml = (type) => STORAGE_FIELDS[type].map(([key, label, ph, kind]) => {
+    const hint = kind === "secret" && cfg[`${key}_set`] ? "gesetzt – leer lassen, um es zu behalten" : ph;
+    return `<label class="field"><span>${label}</span><input type="${kind === "secret" ? "password" : "text"}" name="cfg_${key}" value="${kind ? "" : esc(cfg[key] ?? "")}" placeholder="${esc(hint)}" autocomplete="off"></label>`;
+  }).join("");
+  const type = t ? t.type : "nfs";
+  formModal({
+    title: t ? `Speicher ${t.name}` : "Gemeinsamen Speicher hinzufügen", wide: true,
+    fields: `<div class="row"><label class="field"><span>Name</span><input type="text" name="name" value="${esc(t ? t.name : "")}" placeholder="z. B. NAS" required></label>
+        <label class="field"><span>Typ</span><select name="type" id="sto-type">${["nfs", "smb", "path"].map((x) => `<option value="${x}" ${x === type ? "selected" : ""}>${{ nfs: "NFS (empfohlen)", smb: "SMB / CIFS", path: "Vorhandener Mount (CephFS, GlusterFS …)" }[x]}</option>`).join("")}</select></label></div>
+      <div id="sto-fields">${fieldsHtml(type)}</div>
+      <label class="check"><input type="checkbox" name="user_visible" ${t && t.user_visible ? "checked" : ""}><span>Auch Benutzer dürfen Server hier anlegen (sonst nur Admins)</span></label>
+      <p class="muted small" style="margin:0">Der Speicher wird auf allen Nodes unter <code>/mnt/pombot-storage/ID</code> eingehängt. Bei „Vorhandener Mount“ muss der Pfad auf jedem Node bereits eingehängt sein (z. B. CephFS über <code>/etc/fstab</code>).
+        Für HA sollte der Speicher selbst ausfallsicher sein – ist er nicht erreichbar, stoppen die HA-Server darauf.</p>`,
+    onReady: (mm) => { $("#sto-type", mm).onchange = (e) => { $("#sto-fields", mm).innerHTML = fieldsHtml(e.target.value); }; },
+    onSubmit: async (d, mm) => {
+      const body = { name: d.name, type: d.type, user_visible: d.user_visible, config: {} };
+      Object.entries(d).forEach(([k, v]) => { if (k.startsWith("cfg_")) body.config[k.slice(4)] = v; });
+      const saved = await api(t ? `/api/admin/storages/${t.id}` : "/api/admin/storages", { method: t ? "PUT" : "POST", body });
+      mm.close();
+      if (saved.sync_errors && saved.sync_errors.length) toast(`Gespeichert, aber: ${saved.sync_errors.join("; ")}`, "bad");
+      else toast("Gespeichert und auf den Nodes eingehängt");
+      route();
+      return saved;
+    },
+  });
+}
+
+async function settingsStorages(head) {
+  const list = await api("/api/admin/storages");
+  S.handlers.stoAdd = () => storageDialog(null);
+  S.handlers.stoEdit = (ds) => storageDialog(list.find((t) => t.id === +ds.id));
+  S.handlers.stoDelete = async (ds) => {
+    if (!(await confirmBox("Speicher entfernen?", "Er wird im Panel entfernt. Die Daten auf dem Speicher bleiben erhalten.", { danger: true, ok: "Entfernen" }))) return;
+    await api(`/api/admin/storages/${ds.id}`, { method: "DELETE" });
+    route();
+  };
+  S.handlers.stoSync = async (ds, el) => {
+    el.disabled = true;
+    el.innerHTML = `<span class="spinner"></span> Hänge ein …`;
+    const r = await api("/api/admin/storages/sync", { method: "POST" }).catch((e) => ({ errors: [e.message] }));
+    if (r.errors.length) toast(r.errors.join("; "), "bad"); else toast("Auf allen Nodes abgeglichen");
+    route();
+  };
+  const nodeState = (n) => !n.online ? `<span class="muted small">${esc(n.node)}: offline</span>`
+    : n.mounted ? `<span>${badge(esc(n.node), "good")} ${n.free != null ? `<span class="small muted">${fmtBytes(n.free)} frei</span>` : ""}</span>`
+      : `<span>${badge(esc(n.node), "bad")} <span class="small muted">${esc(n.error || "nicht eingehängt")}</span></span>`;
+  setMain(head + `<div class="card"><div class="card-head"><h2>Gemeinsamer Speicher</h2><div class="row" style="flex:none;gap:8px">
+      ${list.length ? `<button class="btn sm" data-act="stoSync">Neu einhängen</button>` : ""}<button class="btn primary sm" data-act="stoAdd">${icon("plus")}Speicher hinzufügen</button></div></div>
+    ${list.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Typ</th><th>Ziel</th><th>Nodes</th><th>Server</th><th></th></tr></thead><tbody>
+      ${list.map((t) => `<tr><td><strong>${esc(t.name)}</strong>${t.user_visible ? ` ${badge("für Benutzer", "info")}` : ""}</td><td><span class="type-tag">${esc(t.type_label)}</span></td><td class="mono small">${esc(t.where)}</td>
+        <td><div class="stack" style="gap:4px">${t.nodes.map(nodeState).join("") || `<span class="muted small">keine Nodes</span>`}</div></td><td>${t.guests}</td>
+        <td class="right nowrap"><button class="btn sm" data-act="stoEdit" data-id="${t.id}">Bearbeiten</button>
+          <button class="btn sm danger" data-act="stoDelete" data-id="${t.id}" ${t.guests ? "disabled" : ""}>Entfernen</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">Noch kein gemeinsamer Speicher. Server liegen bisher lokal auf ihrem Node.<br><br>
+      Mit einem Speicher, den alle Nodes erreichen (NFS, SMB oder ein vorhandener CephFS-Mount), können Server ohne Kopieren umziehen und bei Ausfall eines Nodes automatisch woanders starten (HA).</div>`}</div>`);
+}
+
 // ------------------------------------------------------------------ Firewall
 
 const FW_PRESETS = {
@@ -1089,8 +1157,11 @@ async function guestSettings(g, shell) {
       <div class="card"><div class="card-head"><h2>root-Passwort zurücksetzen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Erzeugt ein neues zufälliges Passwort und setzt es im laufenden System${g.type === "kvm" ? " (über den qemu-guest-agent)" : ""}.</p>
         <button class="btn" data-act="resetPw" ${g.status === "ready" && g.power === "running" ? "" : "disabled"}>Neues Passwort erzeugen</button></div></div>
+      ${admin && g.storage_id ? `<div class="card"><div class="card-head"><h2>Hochverfügbarkeit (HA)</h2>${g.ha ? badge("Aktiv", "good") : badge("Aus")}</div><div class="card-body">
+        <p class="muted" style="margin-top:0">Die Festplatte liegt auf dem gemeinsamen Speicher <strong>${esc(g.storage)}</strong>. Mit HA wird der Server automatisch auf einem anderen Node gestartet, wenn sein Node länger als 2 Minuten ausfällt. Leases auf dem Speicher verhindern, dass er doppelt läuft.</p>
+        <label class="check"><input type="checkbox" id="ha-toggle" ${g.ha ? "checked" : ""}><span>HA für diesen Server aktivieren</span></label></div></div>` : ""}
       ${admin ? `<div class="card"><div class="card-head"><h2>Auf anderen Node umziehen</h2></div><div class="card-body">
-        <p class="muted" style="margin-top:0">Der Server wird heruntergefahren, über das Panel auf den neuen Node übertragen, dort eingerichtet und wieder gestartet. Die Unterbrechung dauert je nach Festplattengröße einige Minuten.</p>
+        <p class="muted" style="margin-top:0">${g.storage_id ? "Der Server liegt auf gemeinsamem Speicher: Er wird heruntergefahren, auf dem neuen Node registriert und dort wieder gestartet – ohne Daten zu kopieren. Die Unterbrechung dauert meist unter einer Minute." : "Der Server wird heruntergefahren, über das Panel auf den neuen Node übertragen, dort eingerichtet und wieder gestartet. Die Unterbrechung dauert je nach Festplattengröße einige Minuten."}</p>
         <button class="btn" data-act="migrate" ${["ready", "error"].includes(g.status) ? "" : "disabled"}>Umziehen …</button></div></div>` : ""}
       <div class="card"><div class="card-head"><h2>Neu installieren</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Setzt den Server mit einem frischen Betriebssystem neu auf. IP-Adressen bleiben erhalten, <strong>alle Daten werden gelöscht</strong>.</p>
@@ -1110,6 +1181,11 @@ async function guestSettings(g, shell) {
     await api(`/api/guests/${g.id}`, { method: "PATCH", body }).then(() => { toast("Gespeichert"); updateSidebar(); }).catch(fail);
   };
   bindCdrom(g);
+  if ($("#ha-toggle")) $("#ha-toggle").onchange = async (e) => {
+    await api(`/api/guests/${g.id}`, { method: "PATCH", body: { ha: e.target.checked } })
+      .then(() => { toast(e.target.checked ? "HA aktiviert" : "HA deaktiviert"); route(true); })
+      .catch((err) => { e.target.checked = !e.target.checked; fail(err); });
+  };
   S.handlers.resetPw = async () => {
     if (!(await confirmBox("Passwort zurücksetzen?", "Das bisherige root-Passwort funktioniert danach nicht mehr.", { ok: "Zurücksetzen" }))) return;
     const r = await api(`/api/guests/${g.id}/password`, { method: "POST", body: {} });
@@ -1138,7 +1214,10 @@ async function guestSettings(g, shell) {
           <option value="none">${v === 4 ? "Keine feste IPv4 (DHCP)" : "Keine IPv6"}</option></select>
           ${!keepOk ? `<div class="hint" style="color:var(--warn)">${esc(cur.address)} (Pool ${esc(cur.pool)}) ist auf dem Ziel-Node nicht nutzbar – bitte neue IP wählen.</div>` : ""}</label>`;
       };
-      $("#mg-net", m).innerHTML = row(4) + row(6);
+      const sto = !chk.storage ? "" : chk.shared
+        ? `<div class="alert" style="margin-bottom:12px">Gemeinsamer Speicher ${esc(chk.storage)} ist auf dem Ziel eingehängt – es werden keine Daten kopiert.</div>`
+        : `<div class="alert bad" style="margin-bottom:12px">Speicher ${esc(chk.storage)} ist auf diesem Node nicht eingehängt – Umzug nicht möglich.</div>`;
+      $("#mg-net", m).innerHTML = sto + row(4) + row(6);
     };
     $("#mg-node", m).onchange = () => renderNet().catch(fail);
     await renderNet();
@@ -1175,8 +1254,9 @@ async function guestSettings(g, shell) {
 
 async function viewCreate() {
   const admin = S.me.role === "admin";
-  const [templates, nodes, pools, me, users] = await Promise.all([
+  const [templates, nodes, pools, me, users, storages] = await Promise.all([
     api("/api/templates"), api("/api/nodes"), api("/api/pools"), api("/api/me"), admin ? api("/api/users/brief") : [],
+    api("/api/storages").catch(() => []),
   ]);
   const q = me.quota, u = me.usage;
   const free = admin ? { cores: 64, memory_mb: 262144, disk_gb: 4096 }
@@ -1227,6 +1307,9 @@ async function viewCreate() {
             <label class="field"><span>IPv4-Adresse</span><select name="ipv4_pool"><option value="auto">Automatisch aus passendem Pool</option>${poolOpt(4)}<option value="none">Keine feste IP (DHCP)</option></select></label>
             <label class="field"><span>IPv6-Adresse</span><select name="ipv6_pool"><option value="none">Keine</option>${pools.some((p) => p.version === 6) ? `<option value="auto">Automatisch</option>` : ""}${poolOpt(6)}</select></label>
           </div>
+          ${storages.length ? `<label class="field"><span>Festplatte liegt auf</span><select name="storage_id"><option value="">Lokal auf dem Node</option>
+            ${storages.map((x) => `<option value="${x.id}" ${x.nodes.length ? "" : "disabled"}>${esc(x.name)} (${esc(x.type_label)}, gemeinsam)${x.nodes.length ? "" : " – auf keinem Node eingehängt"}</option>`).join("")}</select>
+            <div class="hint">Auf gemeinsamem Speicher kann der Server ohne Kopieren umziehen und bei Ausfall eines Nodes automatisch woanders starten (HA).</div></label>` : ""}
           <p class="muted small" style="margin:0">Die nächste freie Adresse wird reserviert und samt Gateway und DNS im System eingetragen.</p>
         </div></div>
 
@@ -1380,6 +1463,7 @@ async function viewCreate() {
       password: form.password.value || null, ssh_keys: form.ssh_keys.value,
     };
     if (form.owner_id) body.owner_id = +form.owner_id.value;
+    if (form.storage_id && form.storage_id.value) body.storage_id = +form.storage_id.value;
     const btn = $("#create-btn");
     btn.disabled = true;
     try {
@@ -2025,9 +2109,10 @@ async function viewSettings(params, m) {
   const tab = m[1] || "general";
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"]]);
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"]]);
   if (tab === "cloudflare") return settingsCloudflare(head);
   if (tab === "backups") return settingsBackupTargets(head);
+  if (tab === "storage") return settingsStorages(head);
   if (tab === "domain") return settingsDomain(head);
   const s = await api("/api/admin/settings");
   const save = async (body) => {

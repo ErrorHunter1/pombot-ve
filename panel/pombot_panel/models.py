@@ -131,9 +131,12 @@ class Guest(Base):
     power: Mapped[str] = mapped_column(String(16), default="unknown")  # running|stopped|paused|unknown|missing
     error: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str] = mapped_column(Text, default="")
+    storage_id: Mapped[int | None] = mapped_column(ForeignKey("storages.id"))  # gemeinsamer Speicher (None = lokal)
+    ha: Mapped[bool] = mapped_column(Boolean, default=False)  # bei Node-Ausfall auf anderem Node starten
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     node: Mapped[Node] = relationship(back_populates="guests")
+    storage: Mapped["SharedStorage | None"] = relationship()
     owner: Mapped[User] = relationship(back_populates="guests")
     template: Mapped[Template | None] = relationship()
     ips: Mapped[list[IPAddress]] = relationship(back_populates="guest")
@@ -141,6 +144,25 @@ class Guest(Base):
     @property
     def agent_name(self) -> str:
         return f"pv{self.vmid}"
+
+
+class SharedStorage(Base):
+    """Gemeinsamer Speicher (NFS, SMB oder vorhandener Mount wie CephFS) für Server-Festplatten.
+    Wird auf allen Nodes eingehängt – Grundlage für HA und schnelle Migration."""
+    __tablename__ = "storages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    type: Mapped[str] = mapped_column(String(8))  # nfs | smb | path
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    user_visible: Mapped[bool] = mapped_column(Boolean, default=False)  # auch Benutzer dürfen Server hier anlegen
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    @property
+    def config(self) -> dict:
+        try:
+            return json.loads(self.config_json or "{}")
+        except ValueError:
+            return {}
 
 
 class FirewallConfig(Base):

@@ -172,6 +172,79 @@ sudo nft list table bridge pombot | grep -q pv100 && fail "Firewall-Regeln wurde
 api GET /api/pools | json '[(p["name"], p["used"]) for p in d]'
 end
 
+step "Gemeinsamer Speicher (NFS): anlegen, auf dem Node einhängen"
+sudo mkdir -p /srv/nfsshared
+echo "/srv/nfsshared 127.0.0.1(rw,sync,no_root_squash,no_subtree_check)" | sudo tee -a /etc/exports >/dev/null
+sudo exportfs -ra
+STO="$(api POST /api/admin/storages '{"name":"ci-nas","type":"nfs","config":{"server":"127.0.0.1","export":"/srv/nfsshared","options":"vers=4,hard,timeo=100,retrans=3"}}')"
+echo "$STO"
+SID="$(echo "$STO" | json 'd["id"]')"
+echo "$STO" | json 'd["nodes"][0]["mounted"]' | grep -q True || fail "NFS-Speicher auf dem Node nicht eingehängt"
+mountpoint -q "/mnt/pombot-storage/$SID" || fail "/mnt/pombot-storage/$SID ist kein Mountpoint"
+api GET /api/storages | json '[(s["name"], s["nodes"]) for s in d]'
+end
+
+step "Container auf gemeinsamem Speicher"
+RES="$(api POST /api/guests "{\"template_id\":$TPL,\"name\":\"ci-shared\",\"hostname\":\"ci-shared\",\"cores\":1,\"memory_mb\":512,\"disk_gb\":4,\"storage_id\":$SID,\"password\":\"CiTestPasswort1\"}")"
+echo "$RES"
+SGID="$(echo "$RES" | json 'd["guest_id"]')"
+SVMID="$(echo "$RES" | json 'd["vmid"]')"
+SN="pv$SVMID"
+wait_task "$(echo "$RES" | json 'd["task_id"]')" 1200
+ls -la "/var/lib/lxc/$SN" "/var/lib/pombot/guests/$SN"
+[ -L "/var/lib/lxc/$SN" ] || fail "/var/lib/lxc/$SN ist kein Symlink auf den Speicher"
+sudo test -f "/srv/nfsshared/guests/$SN/lxc/rootdev" || fail "rootdev liegt nicht auf dem NFS-Speicher"
+sudo lxc-info -n "$SN" -s | grep -q RUNNING || fail "Container auf NFS läuft nicht"
+api GET "/api/guests/$SGID" | json 'd["storage"], d["ha"]'
+end
+
+step "Backup und Wiederherstellung eines Speicher-Containers"
+wait_task "$(api POST "/api/guests/$SGID/backups" '{}' | json 'd["task_id"]')" 900
+SFILE="$(api GET "/api/guests/$SGID/backups" | json "[b['file'] for b in d['items'] if b['location'] is None][0]")"
+sudo tar -tzf "/var/lib/pombot/backups/$SFILE" | grep -q "^$SN/rootdev$" || fail "Backup enthält nur den Symlink statt der Daten"
+wait_task "$(api POST "/api/guests/$SGID/backups/$SFILE/restore" | json 'd["task_id"]')" 900
+[ -L "/var/lib/lxc/$SN" ] || fail "Nach der Wiederherstellung liegt der Container nicht mehr auf dem Speicher"
+sudo lxc-info -n "$SN" -s | grep -q RUNNING || fail "Container läuft nach Wiederherstellung nicht"
+end
+
+step "HA: Lease, Autostart, Startsperre bei fremder Lease"
+api PATCH "/api/guests/$SGID" '{"ha":true}' | json 'd["ha"]' | grep -q True || fail "HA ließ sich nicht einschalten"
+sleep 8
+LEASE="/srv/nfsshared/guests/$SN/.pombot-lease.json"
+sudo cat "$LEASE"; echo
+sudo python3 -c "import json;d=json.load(open('$LEASE'));assert d['node']==open('/etc/machine-id').read().strip()" || fail "Lease gehört nicht diesem Node"
+sudo grep -q "lxc.start.auto = 0" "/var/lib/lxc/$SN/config" || fail "Autostart eines HA-Servers wurde nicht abgeschaltet"
+api POST "/api/guests/$SGID/action" '{"action":"stop"}' | json 'd["state"]'
+sudo python3 -c "import json,time;json.dump({'node':'fremder-node','hostname':'node-b','ts':time.time()},open('$LEASE','w'))"
+OUT="$(api POST "/api/guests/$SGID/action" '{"action":"start"}')"
+echo "$OUT"
+echo "$OUT" | grep -q "Lease" || fail "Start trotz fremder Lease erlaubt"
+sudo lxc-info -n "$SN" -s | grep -q STOPPED || fail "Container wurde trotz fremder Lease gestartet"
+sudo python3 -c "import json,time;json.dump({'node':'fremder-node','hostname':'node-b','ts':time.time()-300},open('$LEASE','w'))"
+api POST "/api/guests/$SGID/action" '{"action":"start"}' | json 'd["state"]' | grep -q running || fail "Start nach abgelaufener Lease nicht möglich"
+end
+
+step "Abmelden und Übernehmen (wie bei Umzug/HA, hier auf demselben Node)"
+TOKEN="$(sudo grep '^POMBOT_AGENT_TOKEN=' /etc/pombot/agent.env | cut -d= -f2-)"
+agent() { curl -sk -X "$1" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" ${3:+-d "$3"} "https://127.0.0.1:8007$2"; }
+api POST "/api/guests/$SGID/action" '{"action":"stop"}' | json 'd["state"]'
+agent POST "/guests/$SN/release" | grep -q ok || fail "Abmelden fehlgeschlagen"
+sudo lxc-ls | grep -qw "$SN" && fail "Container nach dem Abmelden noch registriert"
+sudo test -f "/srv/nfsshared/guests/$SN/lxc/rootdev" || fail "Daten nach dem Abmelden nicht mehr auf dem Speicher"
+sudo test -e "$LEASE" && fail "Eigene Lease wurde beim Abmelden nicht freigegeben"
+agent POST "/guests/$SN/adopt" "{\"type\":\"lxc\",\"storage_id\":\"$SID\",\"ha\":true}" | grep -q ok || fail "Übernahme fehlgeschlagen"
+api POST "/api/guests/$SGID/action" '{"action":"start"}' | json 'd["state"]' | grep -q running || fail "Container startet nach der Übernahme nicht"
+sudo lxc-attach -n "$SN" -- hostname
+end
+
+step "Speicher-Container löschen"
+api DELETE "/api/admin/storages/$SID" | grep -q "noch Server" || fail "Speicher mit Servern hätte nicht gelöscht werden dürfen"
+wait_task "$(api DELETE "/api/guests/$SGID" | json 'd["task_id"]')" 300
+sudo test -e "/srv/nfsshared/guests/$SN" && fail "Daten auf dem Speicher wurden nicht gelöscht"
+[ -e "/var/lib/lxc/$SN" ] || [ -L "/var/lib/lxc/$SN" ] && fail "Symlink unter /var/lib/lxc blieb zurück"
+api DELETE "/api/admin/storages/$SID" | grep -q ok || fail "Leerer Speicher ließ sich nicht entfernen"
+end
+
 step "KVM-VM (Debian-12-Cloud-Image, verschachtelte Virtualisierung wie bei VPS-Hostern)"
 if [ -e /dev/kvm ]; then
   sudo chmod 666 /dev/kvm || true

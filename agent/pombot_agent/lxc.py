@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import netcfg
+from . import netcfg, storage
 from .config import BACKUP_DIR, GUEST_DIR, LXC_BACKEND, LXC_KEYSERVER, LXC_PATH, LXC_UNPRIVILEGED
 from .util import CmdError, check_name, check_snap, ok, run
 
@@ -231,6 +231,12 @@ def create(job, spec: dict) -> dict:
     try:
         job.write(f"Lade Container-Image {spec['lxc_dist']} {spec['lxc_release']} ({arch}) …")
         run(cmd, job=job, timeout=3600, env={"DOWNLOAD_KEYSERVER": LXC_KEYSERVER})
+        if spec.get("storage_id"):
+            # Container-Verzeichnis (Konfiguration + rootdev) auf den gemeinsamen Speicher verschieben
+            target = storage.prepare_guest_dir(spec["storage_id"], name) / "lxc"
+            job.write(f"Verschiebe Container auf gemeinsamen Speicher: {target}")
+            shutil.move(str(_dir(name)), target)
+            (LXC_PATH / name).symlink_to(target)
         for key, value in _limits(spec["cores"], spec["memory_mb"]).items():
             set_config(name, key, value)
         _set_net_config(name, spec.get("ips") or [])
@@ -249,7 +255,10 @@ def create(job, spec: dict) -> dict:
         _log_output(job, attach(name, _ssh_script(spec), job=job, log=False, timeout=1200))
     except Exception:
         job.write("Räume nach Fehler auf …")
-        run(["lxc-destroy", "-n", name, "-f"], check=False)
+        run(["lxc-stop", "-n", name, "-k"], check=False)
+        if not (LXC_PATH / name).is_symlink():
+            run(["lxc-destroy", "-n", name, "-f"], check=False)
+        storage.remove_guest_dirs(name)
         raise
     finally:
         Path(conf_path).unlink(missing_ok=True)
@@ -260,8 +269,10 @@ def delete(job, name: str) -> dict:
     job.write(f"Lösche Container {name} …")
     if exists(name):
         run(["lxc-stop", "-n", name, "-k"], check=False)
-        run(["lxc-destroy", "-n", name, "-f"], job=job)
-    shutil.rmtree(GUEST_DIR / name, ignore_errors=True)
+        _wait_released(name, timeout=30)
+        if not (LXC_PATH / name).is_symlink():  # Speicher-Container: Verzeichnis selbst löschen
+            run(["lxc-destroy", "-n", name, "-f"], job=job)
+    storage.remove_guest_dirs(name)
     return {}
 
 
@@ -470,8 +481,10 @@ def backup(job, name: str, auto: bool = False) -> dict:
     if was_running:
         job.write("Container wird für ein konsistentes Backup gestoppt (Stop-Modus) …")
         _stop(name, job)
+    real = _dir(name).resolve()  # bei gemeinsamem Speicher: Inhalt statt Symlink sichern
     try:
-        run(["tar", "--numeric-owner", "-S", "-czpf", target, "-C", LXC_PATH, name], job=job, timeout=6 * 3600)
+        run(["tar", "--numeric-owner", "-S", "-czpf", target, "--transform", f"s,^{real.name}(/|$),{name}\\1,x",
+             "-C", real.parent, real.name], job=job, timeout=6 * 3600)
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -485,20 +498,29 @@ def restore(job, name: str, archive: Path) -> dict:
     listing = run(["tar", "-tzf", archive], timeout=3600).splitlines()
     if not listing or any(not (p == name or p.startswith(name + "/")) for p in listing):
         raise CmdError("Backup passt nicht zu diesem Container")
-    old = None
-    if exists(name):
-        _stop(name, job)
-        old = LXC_PATH / f".{name}.restore-old"
-        shutil.rmtree(old, ignore_errors=True)
-        _dir(name).rename(old)
+    # Ziel ist das echte Verzeichnis – bei gemeinsamem Speicher bleibt der Container dort (Symlink bleibt)
+    real = _dir(name).resolve()
+    stage = real.parent / f".{name}.restore-new"
+    old = real.parent / f".{name}.restore-old"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
     try:
-        run(["tar", "--numeric-owner", "-xzpf", archive, "-C", LXC_PATH], job=job, timeout=6 * 3600)
+        run(["tar", "--numeric-owner", "-xzpf", archive, "-C", stage], job=job, timeout=6 * 3600)
+        if exists(name):
+            _stop(name, job)
+        if real.exists():
+            shutil.rmtree(old, ignore_errors=True)
+            real.rename(old)
+        (stage / name).rename(real)
     except Exception:
-        shutil.rmtree(_dir(name), ignore_errors=True)
-        if old:
-            old.rename(_dir(name))
+        if old.exists() and not real.exists():
+            old.rename(real)
         raise
-    if old:
-        shutil.rmtree(old, ignore_errors=True)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
+    from . import ha
+    if name in ha.ha_guests():
+        set_config(name, "lxc.start.auto", "0")
     _start(name, job)
     return {"state": state(name)}

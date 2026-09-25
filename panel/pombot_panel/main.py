@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import backup_targets, heartbeat, runtime, scheduler, tasks
+from . import backup_targets, cluster, heartbeat, runtime, scheduler, tasks
 from .config import settings
 from .db import SessionLocal, migrate
 from .routers import admin, auth, extras, guests, nodes, pools, system, users
@@ -57,7 +57,7 @@ async def csrf_and_headers(request: Request, call_next):
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie="pombot_session",
                    max_age=7 * 24 * 3600, same_site="lax", https_only=settings.https)
 
-for r in (auth.router, admin.router, backup_targets.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
+for r in (auth.router, admin.router, backup_targets.router, cluster.router, cluster.user_router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
     app.include_router(r)
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

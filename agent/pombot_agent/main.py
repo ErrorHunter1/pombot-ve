@@ -4,13 +4,14 @@ import hmac
 import ipaddress
 import logging
 import re
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, host, images, isos, kvm, lxc, migrate, remote, routed
+from . import console, firewall, ha, host, images, isos, kvm, lxc, migrate, remote, routed, storage
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -23,6 +24,10 @@ async def lifespan(_: FastAPI):
     # (z. B. falls jemand `systemctl restart nftables` ausführt und damit alles leert).
     async def watchdog():
         while True:
+            try:
+                await asyncio.to_thread(storage.ensure_mounted)
+            except Exception as exc:  # noqa: BLE001
+                log.error("Speicher konnte nicht eingehängt werden: %s", exc)
             try:
                 await asyncio.to_thread(routed.ensure_all)
             except Exception as exc:  # noqa: BLE001
@@ -39,6 +44,7 @@ async def lifespan(_: FastAPI):
     except Exception as exc:  # noqa: BLE001
         log.warning("Prüfung der VM-Definitionen fehlgeschlagen: %s", exc)
     task = asyncio.create_task(watchdog())
+    threading.Thread(target=ha.loop, name="ha", daemon=True).start()
     yield
     task.cancel()
 
@@ -151,6 +157,7 @@ class CreateSpec(BaseModel):
     lxc_dist: str | None = None
     lxc_release: str | None = None
     iso_file: str | None = None  # ISO aus der Bibliothek des Nodes
+    storage_id: str | None = Field(default=None, pattern=r"^[0-9]{1,9}$")  # gemeinsamer Speicher
     instance_suffix: str = "1"
     routed: bool = False  # Zusatz-IPs über pbr0 routen statt direkt bridgen
 
@@ -222,6 +229,8 @@ class ActionBody(BaseModel):
 def guest_action(name: str, body: ActionBody):
     mod = module_for(name)
     with try_lock(name):
+        if body.action in ("start", "resume"):
+            ha.check_start(name)
         new_state = mod.action(name, body.action)
     return {"state": new_state}
 
@@ -370,6 +379,50 @@ def firewall_put(name: str, cfg: dict):
 def firewall_delete(name: str):
     firewall.remove(check_name(name))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- Gemeinsamer Speicher & HA
+
+class StorageSync(BaseModel):
+    storages: list[dict] = []
+
+
+@app.put("/storage", dependencies=[Depends(auth)])
+def storage_sync(body: StorageSync):
+    return storage.sync(body.storages)
+
+
+class HaBody(BaseModel):
+    guests: list[str] = []
+
+
+@app.put("/ha", dependencies=[Depends(auth)])
+def ha_configure(body: HaBody):
+    return ha.configure(body.guests)
+
+
+@app.post("/guests/{name}/release", dependencies=[Depends(auth)])
+def guest_release(name: str, stale: bool = False):
+    with try_lock(name):
+        ha.release(name, stale)
+    return {"ok": True}
+
+
+class AdoptBody(BaseModel):
+    type: str = Field(pattern="^(kvm|lxc)$")
+    storage_id: str = Field(pattern=r"^[0-9]{1,9}$")
+    ha: bool = False
+
+
+@app.post("/guests/{name}/adopt", dependencies=[Depends(auth)])
+def guest_adopt(name: str, body: AdoptBody):
+    with try_lock(name):
+        return ha.takeover(name, body.type, body.storage_id, body.ha)
+
+
+@app.get("/guests/{name}/lease", dependencies=[Depends(auth)])
+def guest_lease(name: str):
+    return {"lease": ha.read_lease(check_name(name)), "holder": ha.lease_holder(name), "me": ha.node_id()}
 
 
 # ---------------------------------------------------------------- Migration
