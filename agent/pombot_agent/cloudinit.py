@@ -45,6 +45,10 @@ def build_seed(target_dir: Path, spec: dict, job=None) -> Path:
     }
     if "." in hostname:
         user_data["fqdn"] = hostname
+    if spec.get("keep_access"):
+        # Nur Netzwerk neu einrichten (z. B. nach MAC-Änderung): Passwort, Schlüssel und SSH-Einstellungen
+        # des laufenden Systems bleiben unangetastet.
+        user_data = {"hostname": short, "manage_etc_hosts": True}
 
     network = {
         "version": 2,

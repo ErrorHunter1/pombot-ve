@@ -235,6 +235,23 @@ def guest_resize(name: str, body: ResizeBody):
     return job_response(start_job("resize", name, mod.resize, name, body.cores, body.memory_mb, body.disk_gb))
 
 
+class MacBody(BaseModel):
+    mac: str = Field(pattern=r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+    hostname: str = Field(pattern=r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,62})$")
+    ips: list[IPSpec] = []
+    dns: list[str] = []
+
+
+@app.post("/guests/{name}/mac", dependencies=[Depends(auth)])
+def guest_mac(name: str, body: MacBody):
+    mod = module_for(name)
+    if int(body.mac.split(":")[0], 16) & 1:
+        raise HTTPException(400, "Multicast-MAC-Adressen sind nicht erlaubt")
+    data = body.model_dump()
+    data["ips"] = [ip.model_dump() for ip in body.ips]
+    return job_response(start_job("mac", name, mod.set_mac, name, data))
+
+
 class PasswordBody(BaseModel):
     user: str = Field(default="root", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
     password: str = Field(min_length=8, max_length=128)

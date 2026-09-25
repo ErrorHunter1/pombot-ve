@@ -6,6 +6,7 @@ Liste einzelner Adressen (z. B. 7 gebuchte Zusatz-IPs). Modus:
   routed  – der Node routet die IPs an die Gäste weiter (/32, Gateway = Haupt-IP des Nodes)
 """
 import ipaddress
+import re
 import threading
 
 from fastapi import HTTPException
@@ -21,34 +22,79 @@ alloc_lock = threading.Lock()
 MAX_SCAN = 1_000_000
 
 
-def parse_list(raw: str) -> list[str]:
-    """Adressen aus Freitext: getrennt durch Zeilen, Kommas oder Leerzeichen; `a-b` für kleine Bereiche."""
-    result: list[str] = []
+MAC_RE = re.compile(r"^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$", re.IGNORECASE)
+
+
+def normalize_mac(raw: str) -> str:
+    mac = raw.strip().lower().replace("-", ":")
+    if not MAC_RE.match(mac):
+        raise HTTPException(400, f"Ungültige MAC-Adresse: {raw}")
+    if int(mac.split(":")[0], 16) & 1:
+        raise HTTPException(400, f"{raw} ist eine Multicast-MAC und kann nicht verwendet werden")
+    if mac == "00:00:00:00:00:00":
+        raise HTTPException(400, "Ungültige MAC-Adresse")
+    return mac
+
+
+def parse_entries(raw: str) -> list[tuple[str, str | None]]:
+    """Adressen aus Freitext: getrennt durch Zeilen, Kommas oder Leerzeichen; `a-b` für kleine Bereiche.
+    Eine MAC direkt hinter einer IP (`77.90.52.70 bc:24:11:11:dc:25`) wird dieser IP fest zugeordnet."""
+    entries: list[list] = []
     for token in raw.replace(",", " ").replace(";", " ").split():
-        token = token.strip()
-        if not token:
+        if MAC_RE.match(token):
+            if not entries or entries[-1][2]:
+                raise HTTPException(400, f"MAC {token} muss direkt hinter einer einzelnen IP stehen")
+            if entries[-1][1]:
+                raise HTTPException(400, f"Für {entries[-1][0]} sind zwei MAC-Adressen angegeben")
+            entries[-1][1] = normalize_mac(token)
             continue
-        try:
-            if "-" in token:
-                start_s, end_s = token.split("-", 1)
-                start = ipaddress.ip_address(start_s)
-                end = ipaddress.ip_address(end_s) if "." in end_s or ":" in end_s else \
-                    ipaddress.ip_address(".".join(start_s.split(".")[:3] + [end_s]))
-                if end < start or int(end) - int(start) > 4096:
-                    raise ValueError
-                result += [str(ipaddress.ip_address(i)) for i in range(int(start), int(end) + 1)]
-            elif "/" in token:
-                result.append(str(ipaddress.ip_interface(token).ip))
-            else:
-                result.append(str(ipaddress.ip_address(token)))
-        except ValueError:
-            raise HTTPException(400, f"Ungültige Adresse in der Liste: {token}")
-    seen, unique = set(), []
-    for ip in result:
-        if ip not in seen:
-            seen.add(ip)
-            unique.append(ip)
-    return unique
+        for ip in _parse_ip_token(token):
+            entries.append([ip, None, "-" in token])
+    result, seen, macs = [], set(), {}
+    for ip, mac, _ in entries:
+        if mac:
+            if mac in macs and macs[mac] != ip:
+                raise HTTPException(400, f"MAC {mac} ist mehreren IPs zugeordnet")
+            macs[mac] = ip
+        if ip in seen:
+            result = [(i, m or mac if i == ip else m) for i, m in result]
+            continue
+        seen.add(ip)
+        result.append((ip, mac))
+    return result
+
+
+def format_entries(entries: list[tuple[str, str | None]]) -> str:
+    return "\n".join(f"{ip} {mac}" if mac else ip for ip, mac in entries)
+
+
+def parse_list(raw: str) -> list[str]:
+    return [ip for ip, _ in parse_entries(raw)]
+
+
+def pool_macs(pool: IPPool) -> dict[str, str]:
+    """Fest zugeordnete MAC-Adressen je IP (aus der Adressliste)."""
+    return {ip: mac for ip, mac in parse_entries(pool.address_list)} if pool.address_list else {}
+
+
+def _parse_ip_token(token: str) -> list[str]:
+    """Eine IP, eine IP mit Präfix (Präfix wird ignoriert) oder ein Bereich wie 1.2.3.10-15."""
+    try:
+        if "-" in token:
+            start_s, end_s = token.split("-", 1)
+            start = ipaddress.ip_address(start_s)
+            if "." in end_s or ":" in end_s:
+                end = ipaddress.ip_address(end_s)
+            else:  # Kurzform 1.2.3.10-15
+                end = ipaddress.ip_address(".".join(start_s.split(".")[:3] + [end_s]))
+            if end < start or int(end) - int(start) > 4096:
+                raise ValueError
+            return [str(ipaddress.ip_address(i)) for i in range(int(start), int(end) + 1)]
+        if "/" in token:
+            return [str(ipaddress.ip_interface(token).ip)]
+        return [str(ipaddress.ip_address(token))]
+    except ValueError:
+        raise HTTPException(400, f"Ungültige Adresse in der Liste: {token}")
 
 
 def pool_list(pool: IPPool) -> list[str]:

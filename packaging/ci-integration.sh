@@ -145,14 +145,15 @@ if [ -e /dev/kvm ]; then
     sleep 5
   done
   if ! timeout 3 bash -c "echo > /dev/tcp/$KIP/22"; then
+    set +e  # Diagnose soll vollständig durchlaufen, auch wenn einzelne Befehle scheitern
     mkdir -p /tmp/diag
-    sudo virsh screenshot "pv$KVMID" /tmp/diag/vm-screen.ppm && (convert /tmp/diag/vm-screen.ppm /tmp/diag/vm-screen.png || true)
+    sudo virsh screenshot "pv$KVMID" /tmp/diag/vm-screen.png
     sudo cp /var/log/libvirt/qemu/pv$KVMID.log /tmp/diag/ 2>/dev/null || true
     sudo cp -r "/var/lib/pombot/guests/pv$KVMID/seed" /tmp/diag/seed 2>/dev/null || true
     sudo virsh dumpxml "pv$KVMID" > /tmp/diag/domain.xml
     { ping -c 2 -W 2 "$KIP"; ip neigh; bridge fdb show br vmbr0; bridge link; sudo virsh domiflist "pv$KVMID";
       sudo virsh domstats "pv$KVMID" --interface --cpu-total; sudo iptables -S FORWARD; ls -la /dev/kvm; } > /tmp/diag/net.txt 2>&1
-    sudo chmod -R a+r /tmp/diag
+    sudo chown -R "$(id -u):$(id -g)" /tmp/diag; chmod -R a+rX /tmp/diag
     cat /tmp/diag/net.txt
     fail "VM nicht per SSH erreichbar"
   fi

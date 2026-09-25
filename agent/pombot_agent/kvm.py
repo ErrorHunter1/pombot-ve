@@ -283,6 +283,47 @@ def resize(job, name: str, cores: int | None, memory_mb: int | None, disk_gb: in
     return {}
 
 
+def _cold_stop(name: str, job) -> bool:
+    """Fährt die VM sauber herunter (max. 90 s, danach hart). Liefert, ob sie lief."""
+    if state(name) not in ("running", "paused"):
+        return False
+    job.write("Fahre VM herunter …")
+    run(["virsh", "shutdown", name], check=False)
+    for _ in range(90):
+        if state(name) == "stopped":
+            break
+        time.sleep(1)
+    else:
+        job.write("VM reagiert nicht – harter Stopp.")
+        run(["virsh", "destroy", name], check=False)
+    return True
+
+
+def set_mac(job, name: str, spec: dict) -> dict:
+    """MAC-Adresse ändern. Das Netzwerk im Gast ist per cloud-init an die MAC gebunden, daher wird ein
+    neuer cloud-init-Seed mit neuer Instanz-ID erzeugt: Beim nächsten Start richtet cloud-init das
+    Netzwerk für die neue MAC ein. Passwort und SSH-Schlüssel bleiben erhalten."""
+    was_running = _cold_stop(name, job)
+    root = _xml(name, inactive=True)
+    iface = root.find("./devices/interface/mac")
+    if iface is None:
+        raise CmdError("VM hat keine Netzwerkkarte")
+    old = iface.get("address")
+    iface.set("address", spec["mac"])
+    d = _guest_dir(name)
+    d.mkdir(parents=True, exist_ok=True)
+    if (d / "seed.iso").exists() or (d / "seed").exists():
+        cloudinit.build_seed(d, {**spec, "name": name, "keep_access": True,
+                                 "instance_suffix": f"mac{int(time.time())}"}, job)
+    path = d / "domain.xml"
+    path.write_text(ET.tostring(root, encoding="unicode"))
+    run(["virsh", "define", path], job=job)
+    job.write(f"MAC geändert: {old} → {spec['mac']}")
+    if was_running:
+        run(["virsh", "start", name], job=job)
+    return {"state": state(name)}
+
+
 def set_password(name: str, user: str, password: str) -> None:
     if state(name) != "running":
         raise CmdError("Die VM muss laufen (qemu-guest-agent wird benötigt)")

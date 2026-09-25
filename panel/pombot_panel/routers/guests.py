@@ -143,9 +143,16 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
         db.add(guest)
         db.flush()
         for pool in pools:
-            if not ipam.allocate(db, pool, guest.id):
+            ip = ipam.allocate(db, pool, guest.id)
+            if not ip:
                 db.rollback()
                 raise HTTPException(400, f"Pool {pool.name} hat keine freien Adressen mehr")
+            fixed_mac = ipam.pool_macs(pool).get(ip.address)
+            if fixed_mac:  # IP ist beim Hoster an eine bestimmte MAC gebunden
+                if db.scalar(select(Guest.id).where(Guest.mac == fixed_mac, Guest.id != guest.id)):
+                    db.rollback()
+                    raise HTTPException(400, f"Die MAC {fixed_mac} für {ip.address} nutzt bereits ein anderer Server")
+                guest.mac = fixed_mac
         task = create_task(db, user.id, "create", f"{guest.name} (#{guest.vmid})", node.id, guest.id)
         audit(db, user, "guest-create", f"#{guest.vmid} {guest.name} {template.name} auf {node.name}",
               client_ip(request))
@@ -249,6 +256,39 @@ def reset_password(guest_id: int, body: PasswordBody, request: Request, user: Us
     audit(db, user, "guest-password", f"#{g.vmid} {g.name}", client_ip(request))
     db.commit()
     return {"password": password}
+
+
+class MacBody(BaseModel):
+    mac: str = Field(max_length=17)
+
+
+@router.post("/{guest_id}/mac")
+def change_mac(guest_id: int, body: MacBody, request: Request, user: User = Depends(current_user),
+               db: Session = Depends(get_db)):
+    """MAC-Adresse ändern (nur Admin – eine fremde MAC könnte Verkehr anderer Server abgreifen)."""
+    if not user.is_admin:
+        raise HTTPException(403, "Nur Administratoren können die MAC-Adresse ändern")
+    g = guest_for(db, user, guest_id)
+    mac = ipam.normalize_mac(body.mac)
+    _ensure_ready(g)
+    if mac == g.mac:
+        return {"task_id": None}
+    if db.scalar(select(Guest.id).where(Guest.mac == mac, Guest.id != g.id)):
+        raise HTTPException(400, "Diese MAC-Adresse nutzt bereits ein anderer Server")
+    payload = {"mac": mac, "hostname": g.hostname, "ips": [ipam.ip_spec(ip, g.node) for ip in g.ips],
+               "dns": ipam.pool_dns(g.ips[0].pool if g.ips else None)}
+    task = create_task(db, user.id, "mac", f"{g.name} (#{g.vmid}): {g.mac} → {mac}", g.node_id, g.id)
+    audit(db, user, "guest-mac", f"#{g.vmid} {g.mac} -> {mac}", client_ip(request))
+    db.commit()
+
+    def after(_result, gid=g.id, new=mac):
+        with session_scope() as s:
+            s.get(Guest, gid).mac = new
+        from .extras import push_firewall
+        push_firewall(gid)  # Firewall/Spoofing-Schutz hängt an der MAC
+
+    submit(run_task(task.id, ops.op_job(task.id, g.id, "POST", "/guests/{name}/mac", payload, after)))
+    return {"task_id": task.id}
 
 
 class ReinstallBody(BaseModel):

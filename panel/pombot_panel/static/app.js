@@ -479,7 +479,7 @@ function taskRows(tasks) {
 const TASK_LABELS = {
   create: "Erstellen", delete: "Löschen", reinstall: "Neu installieren", resize: "Ressourcen ändern",
   snapshot: "Snapshot", "snapshot-delete": "Snapshot löschen", "snapshot-rollback": "Snapshot zurückspielen",
-  backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
+  mac: "MAC ändern", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
 };
 
 async function viewDashboard(params, m, silent, seq) {
@@ -919,6 +919,11 @@ async function guestSettings(g, shell) {
       <div class="card"><div class="card-head"><h2>root-Passwort zurücksetzen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Erzeugt ein neues zufälliges Passwort und setzt es im laufenden System${g.type === "kvm" ? " (über den qemu-guest-agent)" : ""}.</p>
         <button class="btn" data-act="resetPw" ${g.status === "ready" && g.power === "running" ? "" : "disabled"}>Neues Passwort erzeugen</button></div></div>
+      ${admin ? `<div class="card"><div class="card-head"><h2>MAC-Adresse</h2></div><div class="card-body">
+        <p class="muted" style="margin-top:0">Nötig, wenn dein Hoster eine IP an eine bestimmte MAC bindet (z. B. nach einem Umzug von Proxmox).
+          Der Server wird dafür kurz neu gestartet${g.type === "kvm" ? "; das Netzwerk darin richtet cloud-init automatisch für die neue MAC ein – Passwort und Daten bleiben erhalten" : ""}.</p>
+        <div class="row"><input type="text" id="mac-input" value="${esc(g.mac)}" maxlength="17" class="mono" aria-label="MAC-Adresse">
+        <button class="btn" style="flex:none" data-act="changeMac" ${["ready", "error"].includes(g.status) ? "" : "disabled"}>MAC ändern</button></div></div></div>` : ""}
       <div class="card"><div class="card-head"><h2>Neu installieren</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Setzt den Server mit einem frischen Betriebssystem neu auf. IP-Adressen bleiben erhalten, <strong>alle Daten werden gelöscht</strong>.</p>
         <div class="row"><select id="reinstall-tpl">${templates.filter((t) => t.type === g.type).map((t) => `<option value="${t.id}" ${t.id === g.template_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>
@@ -940,6 +945,14 @@ async function guestSettings(g, shell) {
     if (!(await confirmBox("Passwort zurücksetzen?", "Das bisherige root-Passwort funktioniert danach nicht mehr.", { ok: "Zurücksetzen" }))) return;
     const r = await api(`/api/guests/${g.id}/password`, { method: "POST", body: {} });
     showSecret("Neues root-Passwort", `Benutzer <code>root</code> auf <strong>${esc(g.name)}</strong>:`, r.password);
+  };
+  S.handlers.changeMac = async () => {
+    const mac = $("#mac-input").value.trim();
+    if (!(await confirmBox("MAC-Adresse ändern?", `<strong>${esc(g.name)}</strong> bekommt die MAC <code>${esc(mac)}</code> und wird dafür neu gestartet.`, { ok: "Ändern" }))) return;
+    const r = await api(`/api/guests/${g.id}/mac`, { method: "POST", body: { mac } });
+    if (!r.task_id) return toast("Die MAC ist bereits eingestellt");
+    await watchTask(r.task_id, "MAC-Adresse ändern");
+    route();
   };
   S.handlers.reinstall = async () => {
     if (!(await confirmBox("Server neu installieren?", "Alle Daten auf dem Server werden unwiderruflich gelöscht.", { danger: true, ok: "Neu installieren", requireText: g.vmid }))) return;
@@ -1349,8 +1362,10 @@ function poolDialog(pool, nodes) {
         <div class="seg" id="pool-source"><button type="button" data-source="list">Einzelne Adressen</button><button type="button" data-source="range">Ganzes Netz / Bereich</button></div></div>
 
       <div id="src-list">
-        <label class="field"><span>IP-Adressen (eine pro Zeile, Komma getrennt oder als Bereich 1.2.3.10-15)</span>
-          <textarea name="address_list" id="pool-list" rows="6" placeholder="185.12.34.56&#10;185.12.34.57&#10;91.200.1.20">${esc(p.address_list || "")}</textarea></label>
+        <label class="field"><span>IP-Adressen (eine pro Zeile oder als Bereich 1.2.3.10-15)</span>
+          <textarea name="address_list" id="pool-list" rows="6" placeholder="185.12.34.56&#10;185.12.34.57 bc:24:11:11:dc:25&#10;91.200.1.20">${esc(p.address_list || "")}</textarea>
+          <div class="hint">Ist eine IP beim Hoster an eine bestimmte MAC-Adresse gebunden, schreib die MAC dahinter
+            (<code>77.90.52.70 bc:24:11:11:dc:25</code>) – der Server bekommt dann automatisch genau diese MAC.</div></label>
         <div style="display:flex;gap:10px;align-items:center;margin:-4px 0 14px;flex-wrap:wrap">
           <button type="button" class="btn sm" id="pool-detect">${icon("refresh")}IPs und Gateway vom Node erkennen</button>
           <span class="muted small" id="list-count"></span></div>
@@ -1384,7 +1399,7 @@ function poolDialog(pool, nodes) {
         $("#gw-field", mm).classList.toggle("hidden", routed);
         $("#bridge-field", mm).classList.toggle("hidden", routed);
         $("#net-label", mm).textContent = list ? "Netz, zu dem die Adressen gehören (CIDR)" : "Netz (CIDR)";
-        const count = form.address_list.value.split(/[\s,;]+/).filter(Boolean).length;
+        const count = form.address_list.value.split(/[\s,;]+/).filter((t) => t && !/^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$/i.test(t)).length;
         $("#list-count", mm).textContent = count ? `${count} ${count === 1 ? "Eintrag" : "Einträge"}` : "";
       };
       $$("#pool-mode button", mm).forEach((b) => b.onclick = () => { st.mode = b.dataset.mode; sync(); });
@@ -1489,8 +1504,8 @@ async function viewPool(params, m) {
       <div class="card stat"><div class="label">Frei</div><div class="value">${p.size - p.used}</div></div>
       <div class="card stat"><div class="label">Nächste freie Adresse</div><div class="value mono" style="font-size:20px">${esc(d.next_free || "–")}</div></div>
     </div>
-    <div class="card">${d.addresses.length ? `<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Verwendung</th><th>Besitzer</th><th>Notiz</th><th></th></tr></thead><tbody>
-      ${d.addresses.map((a) => `<tr><td class="mono">${esc(a.address)}</td>
+    <div class="card">${d.addresses.length ? `<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Feste MAC</th><th>Verwendung</th><th>Besitzer</th><th>Notiz</th><th></th></tr></thead><tbody>
+      ${d.addresses.map((a) => `<tr><td class="mono">${esc(a.address)}</td><td class="mono small">${esc(a.mac || "–")}</td>
         <td>${a.guest ? `<a href="#/guest/${a.guest_id}">${esc(a.guest)}</a>` : a.reserved ? badge("Reserviert", "warn") : badge("Verwaist", "bad")}</td>
         <td>${esc(a.owner || "–")}</td><td>${esc(a.note)}</td>
         <td class="right">${a.guest ? "" : `<button class="btn sm" data-act="release" data-id="${a.id}" data-addr="${esc(a.address)}">Freigeben</button>`}</td></tr>`).join("")}

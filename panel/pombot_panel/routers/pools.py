@@ -44,7 +44,7 @@ def _clean(body: PoolBody, db: Session) -> dict:
         data[key] = (data[key] or "").strip() or None
     data["network"] = ipam.validate_pool(data["mode"], data["network"], data["gateway"], data["range_start"],
                                          data["range_end"], data["address_list"])
-    data["address_list"] = "\n".join(ipam.parse_list(data["address_list"]))
+    data["address_list"] = ipam.format_entries(ipam.parse_entries(data["address_list"]))
     if data["mode"] == "routed":
         # Gateway ist automatisch die Haupt-IP des Nodes; Gäste hängen an der internen Bridge pbr0
         data["gateway"], data["bridge"] = None, ipam.ROUTED_BRIDGE
@@ -121,12 +121,13 @@ def pool_addresses(pool_id: int, user: User = Depends(require_admin), db: Sessio
     if not pool:
         raise HTTPException(404, "Pool nicht gefunden")
     rows = sorted(pool.addresses, key=lambda a: ipaddress.ip_address(a.address))
+    macs = ipam.pool_macs(pool)
     return {
         "pool": pool_dict(db, pool),
         "next_free": ipam.free_address(db, pool),
         "addresses": [{
             "id": a.id, "address": a.address, "reserved": a.reserved, "note": a.note,
-            "guest_id": a.guest_id, "guest": f"{a.guest.name} (#{a.guest.vmid})" if a.guest else None,
+            "mac": macs.get(a.address), "guest_id": a.guest_id, "guest": f"{a.guest.name} (#{a.guest.vmid})" if a.guest else None,
             "owner": a.guest.owner.username if a.guest else None,
         } for a in rows],
     }

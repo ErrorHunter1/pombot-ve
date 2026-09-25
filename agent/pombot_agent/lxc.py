@@ -357,6 +357,20 @@ def resize(job, name: str, cores: int | None, memory_mb: int | None, disk_gb: in
     return {}
 
 
+def set_mac(job, name: str, spec: dict) -> dict:
+    """MAC-Adresse ändern. Im Container ist das Netzwerk an den Namen eth0 gebunden, nicht an die MAC –
+    ein Neustart genügt."""
+    was_running = state(name) in ("running", "paused")
+    if was_running:
+        _stop(name, job)
+    old = get_config(name, "lxc.net.0.hwaddr")
+    set_config(name, "lxc.net.0.hwaddr", spec["mac"])
+    job.write(f"MAC geändert: {old} → {spec['mac']}")
+    if was_running:
+        _start(name, job)
+    return {"state": state(name)}
+
+
 def set_password(name: str, user: str, password: str) -> None:
     if state(name) != "running":
         raise CmdError("Der Container muss laufen")
