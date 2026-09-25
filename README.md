@@ -1,4 +1,4 @@
-# PomBot VE – eigene Proxmox-Alternative
+# PomBot VE – eigene Proxmox-Alternative Created with KI
 
 Web-Panel zum Verwalten von **KVM-VMs** und **LXC-Containern** auf beliebig vielen Servern (Nodes).
 Neue Server werden über eine interaktive Oberfläche bestellt. **IP-Adresse, Gateway, DNS, Hostname,
