@@ -118,9 +118,7 @@ def _set_net_config(name: str, ips: list[dict]) -> None:
         lines.append(f"lxc.net.0.{fam}.address = {ip['address']}/{ip['prefix']}")
         if ip.get("gateway"):
             lines.append(f"lxc.net.0.{fam}.gateway = {ip['gateway']}")
-    (_dir(name) / "config").write_text("
-".join(lines) + "
-")
+    (_dir(name) / "config").write_text("\n".join(lines) + "\n")
 
 
 def _network_script(spec: dict) -> str:
