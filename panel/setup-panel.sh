@@ -83,6 +83,22 @@ fi
 chown root:pombot /etc/pombot/panel-key.pem /etc/pombot/panel-cert.pem
 chmod 640 /etc/pombot/panel-key.pem
 
+# In Containern (LXC, OpenVZ, Docker …) darf systemd keine eigenen Mount-Namespaces anlegen –
+# ProtectSystem/PrivateTmp würden den Start mit Fehler 226/NAMESPACE verhindern.
+DROPIN=/etc/systemd/system/pombot-panel.service.d/10-container.conf
+VIRT="$(systemd-detect-virt --container 2>/dev/null || true)"
+if [ -n "$VIRT" ] && [ "$VIRT" != "none" ]; then
+  log "Container erkannt ($VIRT) – passe Dienst-Absicherung an …"
+  mkdir -p "$(dirname "$DROPIN")"
+  cat > "$DROPIN" <<'EOF'
+[Service]
+ProtectSystem=no
+PrivateTmp=no
+EOF
+else
+  rm -f "$DROPIN"
+fi
+
 log "Starte Dienst pombot-panel …"
 systemctl daemon-reload
 systemctl enable pombot-panel >/dev/null 2>&1

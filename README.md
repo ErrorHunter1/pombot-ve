@@ -32,11 +32,11 @@ und auf den Server kopieren (das Repository ist privat, z. B. mit
 
 ```bash
 # Panel (Web-Oberfläche)
-sudo apt install ./pombot-panel_0.4.1_all.deb
+sudo apt install ./pombot-panel_0.4.2_all.deb
 sudo cat /root/pombot-admin.txt          # Adresse + Admin-Passwort
 
 # Node (auch auf demselben Server möglich) – gibt einen Join-Code aus
-sudo apt install ./pombot-agent_0.4.1_all.deb
+sudo apt install ./pombot-agent_0.4.2_all.deb
 ```
 
 `apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Updates: neues Paket
