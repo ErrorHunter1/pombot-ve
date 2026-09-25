@@ -10,7 +10,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from . import cloudinit, images
-from .config import BACKUP_DIR, GUEST_DIR
+from .config import BACKUP_DIR, GUEST_DIR, KVM_CPU, KVM_SERIAL
 from .util import CmdError, check_name, check_snap, ok, run
 
 BACKUP_SNAP = "pvbackup"
@@ -52,6 +52,29 @@ def _guest_dir(name: str) -> Path:
     return GUEST_DIR / check_name(name)
 
 
+def nested() -> bool:
+    """True, wenn der Node selbst eine VM ist (verschachtelte Virtualisierung)."""
+    try:
+        return run(["systemd-detect-virt", "--vm"], check=False, timeout=10).strip() not in ("", "none")
+    except CmdError:
+        return False
+
+
+def cpu_xml() -> str:
+    mode = KVM_CPU
+    if mode == "auto":
+        mode = "host-model" if nested() else "host-passthrough"
+    if mode in ("host-passthrough", "host-model"):
+        return f"<cpu mode='{mode}' check='none'/>"
+    return f"<cpu mode='custom' match='exact' check='none'><model fallback='allow'>{escape(mode)}</model></cpu>"
+
+
+def use_serial() -> bool:
+    if KVM_SERIAL in ("0", "1"):
+        return KVM_SERIAL == "1"
+    return not nested()
+
+
 def domain_xml(spec: dict, disk: Path, cdrom: Path | None, kvm: bool) -> str:
     cdrom_xml = ""
     if cdrom:
@@ -62,7 +85,8 @@ def domain_xml(spec: dict, disk: Path, cdrom: Path | None, kvm: bool) -> str:
       <target dev='sda' bus='sata'/>
       <readonly/>
     </disk>"""
-    cpu = "<cpu mode='host-passthrough' check='none'/>" if kvm else ""
+    cpu = cpu_xml() if kvm else ""
+    serial = "\n    <serial type='pty'/>\n    <console type='pty'/>" if use_serial() else ""
     return f"""<domain type='{"kvm" if kvm else "qemu"}'>
   <name>{spec['name']}</name>
   <title>{escape(spec.get('hostname') or spec['name'])}</title>
@@ -94,7 +118,7 @@ def domain_xml(spec: dict, disk: Path, cdrom: Path | None, kvm: bool) -> str:
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
-    <input type='tablet' bus='usb'/>
+    <input type='tablet' bus='usb'/>{serial}
     <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
     <video><model type='vga'/></video>
     <memballoon model='virtio'><stats period='10'/></memballoon>
@@ -170,31 +194,6 @@ def action(name: str, act: str) -> str:
         raise CmdError("Unbekannte Aktion")
     run(cmds[act], timeout=120)
     return state(name)
-
-
-def remove_serial_consoles() -> list[str]:
-    """Entfernt die serielle Konsole aus bestehenden VMs (ältere PomBot-Versionen hatten eine).
-    Bei verschachtelter Virtualisierung (Server ist selbst eine VM) ist die emulierte serielle
-    Schnittstelle extrem langsam und bringt den Kernel der VM beim Booten zum Hängen.
-    Wirkt ab dem nächsten Stoppen/Starten der VM."""
-    changed = []
-    for name in list_guests():
-        try:
-            root = _xml(name, inactive=True)
-            devices = root.find("devices")
-            found = [el for el in devices if el.tag in ("serial", "console")]
-            if not found:
-                continue
-            for el in found:
-                devices.remove(el)
-            path = _guest_dir(name) / "domain.xml"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(ET.tostring(root, encoding="unicode"))
-            run(["virsh", "define", path])
-            changed.append(name)
-        except (CmdError, ET.ParseError, OSError):
-            continue
-    return changed
 
 
 def _xml(name: str, inactive: bool = False) -> ET.Element:
@@ -299,26 +298,31 @@ def _cold_stop(name: str, job) -> bool:
     return True
 
 
-def set_mac(job, name: str, spec: dict) -> dict:
-    """MAC-Adresse ändern. Das Netzwerk im Gast ist per cloud-init an die MAC gebunden, daher wird ein
-    neuer cloud-init-Seed mit neuer Instanz-ID erzeugt: Beim nächsten Start richtet cloud-init das
-    Netzwerk für die neue MAC ein. Passwort und SSH-Schlüssel bleiben erhalten."""
+def set_network(job, name: str, spec: dict) -> dict:
+    """Netzwerk ändern (IPs, MAC, Bridge). Das Netzwerk im Gast richtet cloud-init ein: Es bekommt einen
+    neuen Seed mit neuer Instanz-ID und konfiguriert beim nächsten Start alles neu. Passwort, SSH-Schlüssel
+    und Daten bleiben erhalten."""
     was_running = _cold_stop(name, job)
     root = _xml(name, inactive=True)
-    iface = root.find("./devices/interface/mac")
+    iface = root.find("./devices/interface")
     if iface is None:
         raise CmdError("VM hat keine Netzwerkkarte")
-    old = iface.get("address")
-    iface.set("address", spec["mac"])
+    mac_el, src_el = iface.find("mac"), iface.find("source")
+    job.write(f"Netzwerkkarte: MAC {mac_el.get('address')} → {spec['mac']}, Bridge {src_el.get('bridge')} → {spec['bridge']}")
+    mac_el.set("address", spec["mac"])
+    src_el.set("bridge", spec["bridge"])
     d = _guest_dir(name)
     d.mkdir(parents=True, exist_ok=True)
     if (d / "seed.iso").exists() or (d / "seed").exists():
         cloudinit.build_seed(d, {**spec, "name": name, "keep_access": True,
-                                 "instance_suffix": f"mac{int(time.time())}"}, job)
+                                 "instance_suffix": f"net{int(time.time())}"}, job)
+        job.write("cloud-init richtet das Netzwerk beim Start neu ein (Passwort und Daten bleiben erhalten).")
+    else:
+        job.write("HINWEIS: VM ohne cloud-init (ISO-Installation) – IP bitte im System selbst anpassen: "
+                  + ", ".join(f"{ip['address']}/{ip['prefix']} GW {ip.get('gateway')}" for ip in spec["ips"]))
     path = d / "domain.xml"
     path.write_text(ET.tostring(root, encoding="unicode"))
     run(["virsh", "define", path], job=job)
-    job.write(f"MAC geändert: {old} → {spec['mac']}")
     if was_running:
         run(["virsh", "start", name], job=job)
     return {"state": state(name)}

@@ -31,6 +31,12 @@ LXC_BACKEND = os.environ.get("POMBOT_LXC_BACKEND", "loop")  # loop | dir
 LXC_UNPRIVILEGED = os.environ.get("POMBOT_LXC_UNPRIVILEGED", "1") == "1"
 LXC_KEYSERVER = os.environ.get("POMBOT_LXC_KEYSERVER", "hkp://keyserver.ubuntu.com:80")
 
+# CPU-Modell für VMs: auto = host-passthrough auf echter Hardware, kompatibles Modell wenn der Node
+# selbst eine VM ist (Nested Virtualization). Sonst: host-passthrough | host-model | <QEMU-Modell>
+KVM_CPU = os.environ.get("POMBOT_KVM_CPU", "auto")
+# Serielle Konsole für VMs: auto = nur auf echter Hardware, 1 = immer, 0 = nie
+KVM_SERIAL = os.environ.get("POMBOT_KVM_SERIAL", "auto")
+
 
 def _parse_allow(raw: str):
     nets = []

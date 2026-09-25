@@ -48,3 +48,23 @@ jobs:
         run: |
           sudo journalctl -u pombot-panel -u pombot-agent --no-pager -n 200 || true
           sudo nft list ruleset || true
+
+  kvm-matrix:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb-pakete
+          path: dist
+      - name: VM-Einstellungen bei verschachtelter Virtualisierung vergleichen
+        run: bash packaging/ci-kvm-matrix.sh
+      - name: Ergebnisse hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kvm-matrix
+          path: /tmp/diag
+          if-no-files-found: ignore

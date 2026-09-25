@@ -133,6 +133,24 @@ def pool_addresses(pool_id: int, user: User = Depends(require_admin), db: Sessio
     }
 
 
+@router.get("/{pool_id}/free")
+def free_addresses(pool_id: int, limit: int = 256, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)):
+    """Freie Adressen eines Pools (für die Auswahl einer bestimmten IP)."""
+    pool = db.get(IPPool, pool_id)
+    if not pool or (pool.admin_only and not user.is_admin):
+        raise HTTPException(404, "Pool nicht gefunden")
+    used = set(db.scalars(select(IPAddress.address).where(IPAddress.pool_id == pool.id)).all())
+    macs = ipam.pool_macs(pool)
+    result = []
+    for ip in ipam.candidates(pool):
+        if ip not in used:
+            result.append({"address": ip, "mac": macs.get(ip)})
+            if len(result) >= min(limit, 1024):
+                break
+    return result
+
+
 class ReserveBody(BaseModel):
     address: str
     note: str = Field(default="", max_length=255)

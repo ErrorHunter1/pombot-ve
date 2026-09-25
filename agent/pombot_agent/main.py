@@ -32,12 +32,6 @@ async def lifespan(_: FastAPI):
             except Exception as exc:  # noqa: BLE001
                 log.error("Firewall konnte nicht geladen werden: %s", exc)
             await asyncio.sleep(60)
-    try:
-        changed = await asyncio.to_thread(kvm.remove_serial_consoles)
-        if changed:
-            log.info("Serielle Konsole entfernt bei: %s (wirkt nach Stoppen/Starten)", ", ".join(changed))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Migration der VM-Definitionen fehlgeschlagen: %s", exc)
     task = asyncio.create_task(watchdog())
     yield
     task.cancel()
@@ -235,21 +229,33 @@ def guest_resize(name: str, body: ResizeBody):
     return job_response(start_job("resize", name, mod.resize, name, body.cores, body.memory_mb, body.disk_gb))
 
 
-class MacBody(BaseModel):
+class NetworkBody(BaseModel):
     mac: str = Field(pattern=r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
     hostname: str = Field(pattern=r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,62})$")
+    bridge: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,15}$")
+    routed: bool = False
     ips: list[IPSpec] = []
     dns: list[str] = []
 
 
-@app.post("/guests/{name}/mac", dependencies=[Depends(auth)])
-def guest_mac(name: str, body: MacBody):
+@app.post("/guests/{name}/network", dependencies=[Depends(auth)])
+def guest_network(name: str, body: NetworkBody):
     mod = module_for(name)
     if int(body.mac.split(":")[0], 16) & 1:
         raise HTTPException(400, "Multicast-MAC-Adressen sind nicht erlaubt")
+    if body.routed and body.bridge != routed.BRIDGE:
+        raise HTTPException(400, f"Geroutete Gäste müssen an {routed.BRIDGE} hängen")
+    for ip in body.ips:
+        ipaddress.ip_address(ip.address)
     data = body.model_dump()
     data["ips"] = [ip.model_dump() for ip in body.ips]
-    return job_response(start_job("mac", name, mod.set_mac, name, data))
+
+    def _network(job, n, d):
+        routed.remove_guest(n)
+        if d["routed"]:
+            routed.set_guest(n, [ip["address"] for ip in d["ips"] if ip["version"] == 4], job)
+        return mod.set_network(job, n, d)
+    return job_response(start_job("network", name, _network, name, data))
 
 
 class PasswordBody(BaseModel):

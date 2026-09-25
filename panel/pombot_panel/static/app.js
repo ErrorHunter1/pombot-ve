@@ -479,7 +479,7 @@ function taskRows(tasks) {
 const TASK_LABELS = {
   create: "Erstellen", delete: "Löschen", reinstall: "Neu installieren", resize: "Ressourcen ändern",
   snapshot: "Snapshot", "snapshot-delete": "Snapshot löschen", "snapshot-rollback": "Snapshot zurückspielen",
-  mac: "MAC ändern", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
+  network: "Netzwerk ändern", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
 };
 
 async function viewDashboard(params, m, silent, seq) {
@@ -553,7 +553,6 @@ async function viewGuests(params, m, silent, seq) {
   };
   $("#guest-filter").addEventListener("input", apply);
   apply();
-  $$("tr[data-search] button").forEach((b) => b.addEventListener("click", (e) => e.stopPropagation(), true));
   return { live: !filter };
 }
 
@@ -693,13 +692,74 @@ async function guestResources(g, shell) {
   };
 }
 
-function guestNetwork(g, shell) {
-  shell(`<div class="card"><div class="card-head"><h2>Netzwerk</h2></div>
-    ${g.ips.length ? `<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Präfix</th><th>Gateway</th><th>Version</th><th>Pool</th></tr></thead><tbody>
-      ${g.ips.map((i) => `<tr><td class="mono">${esc(i.address)}</td><td>/${i.prefix}</td><td class="mono">${esc(i.gateway || "–")}</td><td>IPv${i.version}</td><td>${esc(i.pool)}</td></tr>`).join("")}
-    </tbody></table></div>` : `<div class="empty">Keine feste IP – der Server bezieht seine Adresse per DHCP.</div>`}
-    <div class="card-body" style="border-top:1px solid var(--border)"><dl class="kv"><dt>MAC-Adresse</dt><dd class="mono">${esc(g.mac)}</dd><dt>Schnittstelle</dt><dd>eth0 (virtio)</dd></dl>
-    <p class="muted small" style="margin-bottom:0">Die IP-Adressen wurden automatisch aus dem Pool vergeben und beim Erstellen im System eingetragen.</p></div></div>`);
+async function guestNetwork(g, shell) {
+  const admin = S.me.role === "admin";
+  const pools = await api("/api/pools");
+  const usable = (v) => pools.filter((p) => p.version === v && (!p.node_id || p.node_id === g.node_id));
+  const cur4 = g.ips.find((i) => i.version === 4);
+  const cur6 = g.ips.find((i) => i.version === 6);
+  const busy = !["ready", "error"].includes(g.status);
+  const poolSelect = (v, cur) => `<select id="net-pool${v}">
+      <option value="keep">${cur ? `Beibehalten (${esc(cur.address)})` : "Beibehalten (keine)"}</option>
+      ${usable(v).map((p) => `<option value="${p.id}">${esc(p.name)} – ${p.mode === "routed" ? "geroutet" : `Bridge ${esc(p.bridge)}`} – ${p.size - p.used} frei</option>`).join("")}
+      <option value="none">${v === 4 ? "Keine feste IPv4 (DHCP)" : "Keine IPv6"}</option></select>`;
+
+  shell(`<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>Aktuelle Konfiguration</h2></div>
+      ${g.ips.length ? `<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Gateway</th><th>Pool</th><th>Modus</th></tr></thead><tbody>
+        ${g.ips.map((i) => `<tr><td class="mono">${esc(i.address)}/${i.prefix}</td><td class="mono">${esc(i.gateway || "–")}</td><td>${esc(i.pool)}</td>
+          <td>${i.routed ? badge("Geroutet", "info") : badge("Bridge", "plain")}</td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">Keine feste IP – der Server bezieht seine Adresse per DHCP.</div>`}
+      <div class="card-body" style="border-top:1px solid var(--border)"><dl class="kv">
+        <dt>MAC-Adresse</dt><dd class="mono">${esc(g.mac)}</dd><dt>Schnittstelle</dt><dd>eth0 (virtio)</dd></dl></div></div>
+
+    <div class="card"><div class="card-head"><h2>Netzwerk ändern</h2></div><div class="card-body">
+      <label class="field"><span>IPv4-Adresse</span>${poolSelect(4, cur4)}</label>
+      <div class="field hidden" id="net-addr4-wrap"><span>Bestimmte Adresse (optional)</span>
+        <select id="net-addr4"><option value="">Nächste freie automatisch</option></select></div>
+      <label class="field"><span>IPv6-Adresse</span>${poolSelect(6, cur6)}</label>
+      <div class="field hidden" id="net-addr6-wrap"><span>Bestimmte Adresse (optional)</span>
+        <select id="net-addr6"><option value="">Nächste freie automatisch</option></select></div>
+      ${admin ? `<label class="field"><span>MAC-Adresse</span><input type="text" id="net-mac" class="mono" value="${esc(g.mac)}" maxlength="17">
+        <div class="hint">Nur ändern, wenn der Hoster eine IP an eine bestimmte MAC bindet (z. B. <code>bc:24:11:11:dc:25</code> nach einem Umzug von Proxmox).
+        Hat die gewählte IP im Pool eine feste MAC, wird diese automatisch übernommen.</div></label>` : ""}
+      <div class="alert" style="margin-bottom:14px">Der Server wird für die Änderung kurz neu gestartet. ${g.type === "kvm"
+        ? "cloud-init richtet das Netzwerk in der VM automatisch neu ein – Passwort, SSH-Schlüssel und Daten bleiben erhalten."
+        : "Das Netzwerk im Container wird automatisch neu geschrieben – Daten bleiben erhalten."}</div>
+      <button class="btn primary" data-act="netApply" ${busy ? "disabled" : ""}>Übernehmen</button>
+    </div></div></div>`);
+
+  const loadFree = async (v) => {
+    const sel = $(`#net-pool${v}`).value;
+    const wrap = $(`#net-addr${v}-wrap`);
+    const target = $(`#net-addr${v}`);
+    if (!/^\d+$/.test(sel)) { wrap.classList.add("hidden"); target.value = ""; return; }
+    wrap.classList.remove("hidden");
+    target.innerHTML = `<option value="">Lade …</option>`;
+    const free = await api(`/api/pools/${sel}/free?limit=512`).catch(() => []);
+    target.innerHTML = `<option value="">Nächste freie automatisch${free[0] ? ` (${esc(free[0].address)})` : ""}</option>`
+      + free.map((f) => `<option value="${esc(f.address)}" data-mac="${esc(f.mac || "")}">${esc(f.address)}${f.mac ? ` – feste MAC ${esc(f.mac)}` : ""}</option>`).join("");
+  };
+  [4, 6].forEach((v) => $(`#net-pool${v}`).addEventListener("change", () => loadFree(v).catch(fail)));
+  $("#net-addr4").addEventListener("change", (e) => {
+    const mac = e.target.selectedOptions[0] && e.target.selectedOptions[0].dataset.mac;
+    if (mac && $("#net-mac")) $("#net-mac").value = mac;
+  });
+
+  S.handlers.netApply = async () => {
+    const num = (v) => (/^\d+$/.test(v) ? +v : v);
+    const body = {
+      ipv4_pool: num($("#net-pool4").value), ipv4_address: $("#net-addr4").value || null,
+      ipv6_pool: num($("#net-pool6").value), ipv6_address: $("#net-addr6").value || null,
+    };
+    if ($("#net-mac") && $("#net-mac").value.trim().toLowerCase() !== g.mac) body.mac = $("#net-mac").value.trim();
+    if (body.ipv4_pool === "keep" && body.ipv6_pool === "keep" && !body.mac) return toast("Keine Änderung ausgewählt");
+    if (!(await confirmBox("Netzwerk ändern?", `<strong>${esc(g.name)}</strong> wird dafür kurz neu gestartet.`, { ok: "Übernehmen" }))) return;
+    const r = await api(`/api/guests/${g.id}/network`, { method: "PUT", body });
+    if (!r.task_id) return toast("Keine Änderung nötig");
+    await watchTask(r.task_id, "Netzwerk ändern");
+    route();
+  };
 }
 
 async function guestSnapshots(g, shell, seq) {
@@ -919,11 +979,6 @@ async function guestSettings(g, shell) {
       <div class="card"><div class="card-head"><h2>root-Passwort zurücksetzen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Erzeugt ein neues zufälliges Passwort und setzt es im laufenden System${g.type === "kvm" ? " (über den qemu-guest-agent)" : ""}.</p>
         <button class="btn" data-act="resetPw" ${g.status === "ready" && g.power === "running" ? "" : "disabled"}>Neues Passwort erzeugen</button></div></div>
-      ${admin ? `<div class="card"><div class="card-head"><h2>MAC-Adresse</h2></div><div class="card-body">
-        <p class="muted" style="margin-top:0">Nötig, wenn dein Hoster eine IP an eine bestimmte MAC bindet (z. B. nach einem Umzug von Proxmox).
-          Der Server wird dafür kurz neu gestartet${g.type === "kvm" ? "; das Netzwerk darin richtet cloud-init automatisch für die neue MAC ein – Passwort und Daten bleiben erhalten" : ""}.</p>
-        <div class="row"><input type="text" id="mac-input" value="${esc(g.mac)}" maxlength="17" class="mono" aria-label="MAC-Adresse">
-        <button class="btn" style="flex:none" data-act="changeMac" ${["ready", "error"].includes(g.status) ? "" : "disabled"}>MAC ändern</button></div></div></div>` : ""}
       <div class="card"><div class="card-head"><h2>Neu installieren</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Setzt den Server mit einem frischen Betriebssystem neu auf. IP-Adressen bleiben erhalten, <strong>alle Daten werden gelöscht</strong>.</p>
         <div class="row"><select id="reinstall-tpl">${templates.filter((t) => t.type === g.type).map((t) => `<option value="${t.id}" ${t.id === g.template_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>
@@ -945,14 +1000,6 @@ async function guestSettings(g, shell) {
     if (!(await confirmBox("Passwort zurücksetzen?", "Das bisherige root-Passwort funktioniert danach nicht mehr.", { ok: "Zurücksetzen" }))) return;
     const r = await api(`/api/guests/${g.id}/password`, { method: "POST", body: {} });
     showSecret("Neues root-Passwort", `Benutzer <code>root</code> auf <strong>${esc(g.name)}</strong>:`, r.password);
-  };
-  S.handlers.changeMac = async () => {
-    const mac = $("#mac-input").value.trim();
-    if (!(await confirmBox("MAC-Adresse ändern?", `<strong>${esc(g.name)}</strong> bekommt die MAC <code>${esc(mac)}</code> und wird dafür neu gestartet.`, { ok: "Ändern" }))) return;
-    const r = await api(`/api/guests/${g.id}/mac`, { method: "POST", body: { mac } });
-    if (!r.task_id) return toast("Die MAC ist bereits eingestellt");
-    await watchTask(r.task_id, "MAC-Adresse ändern");
-    route();
   };
   S.handlers.reinstall = async () => {
     if (!(await confirmBox("Server neu installieren?", "Alle Daten auf dem Server werden unwiderruflich gelöscht.", { danger: true, ok: "Neu installieren", requireText: g.vmid }))) return;
@@ -1478,7 +1525,6 @@ async function viewPools() {
         <td>${meter("", p.used, p.size, `${p.used} / ${p.size}`)}</td>
         <td class="right nowrap"><button class="btn sm" data-act="editPool" data-id="${p.id}">Bearbeiten</button> <button class="btn sm danger" data-act="deletePool" data-id="${p.id}">Löschen</button></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Noch keine IP-Pools. Lege einen Pool mit den IP-Adressen deines Hosters an – neue Server bekommen dann automatisch eine freie IP.<br><br><button class="btn primary" data-act="addPool">${icon("plus")}Pool anlegen</button></div>`}</div>`);
-  $$("tr[data-act=openPool] button").forEach((b) => b.addEventListener("click", (e) => e.stopPropagation(), true));
 }
 
 async function viewPool(params, m) {

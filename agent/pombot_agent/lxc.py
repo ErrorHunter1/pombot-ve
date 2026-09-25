@@ -357,17 +357,23 @@ def resize(job, name: str, cores: int | None, memory_mb: int | None, disk_gb: in
     return {}
 
 
-def set_mac(job, name: str, spec: dict) -> dict:
-    """MAC-Adresse ändern. Im Container ist das Netzwerk an den Namen eth0 gebunden, nicht an die MAC –
-    ein Neustart genügt."""
+def set_network(job, name: str, spec: dict) -> dict:
+    """Netzwerk ändern (IPs, MAC, Bridge). Neustart des Containers, danach wird das Netzwerk im
+    Container neu geschrieben – Passwort und Daten bleiben erhalten."""
     was_running = state(name) in ("running", "paused")
     if was_running:
         _stop(name, job)
-    old = get_config(name, "lxc.net.0.hwaddr")
+    job.write(f"Netzwerkkarte: MAC {get_config(name, 'lxc.net.0.hwaddr')} → {spec['mac']}, "
+              f"Bridge {get_config(name, 'lxc.net.0.link')} → {spec['bridge']}")
     set_config(name, "lxc.net.0.hwaddr", spec["mac"])
-    job.write(f"MAC geändert: {old} → {spec['mac']}")
-    if was_running:
-        _start(name, job)
+    set_config(name, "lxc.net.0.link", spec["bridge"])
+    _set_net_config(name, spec.get("ips") or [])
+    _start(name, job)
+    time.sleep(2)
+    job.write("Schreibe Netzwerk-Konfiguration im Container …")
+    _log_output(job, attach(name, _network_script(spec), job=job, log=False))
+    if not was_running:
+        _stop(name, job)
     return {"state": state(name)}
 
 

@@ -154,7 +154,7 @@ def _bounds(pool: IPPool):
     return net, start, end
 
 
-def _candidates(pool: IPPool):
+def candidates(pool: IPPool):
     """Alle vergebbaren Adressen des Pools (Generator), ohne Gateway."""
     gateway = str(ipaddress.ip_address(pool.gateway)) if pool.gateway else None
     if pool.address_list:
@@ -173,7 +173,7 @@ def _candidates(pool: IPPool):
 
 def pool_size(pool: IPPool) -> int:
     if pool.address_list:
-        return sum(1 for _ in _candidates(pool))
+        return sum(1 for _ in candidates(pool))
     _, start, end = _bounds(pool)
     size = int(end) - int(start) + 1
     if pool.gateway:
@@ -189,7 +189,7 @@ def pool_used(db: Session, pool: IPPool) -> int:
 
 def free_address(db: Session, pool: IPPool) -> str | None:
     used = set(db.scalars(select(IPAddress.address).where(IPAddress.pool_id == pool.id)).all())
-    return next((ip for ip in _candidates(pool) if ip not in used), None)
+    return next((ip for ip in candidates(pool) if ip not in used), None)
 
 
 def contains(pool: IPPool, address: str) -> bool:

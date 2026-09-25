@@ -1,5 +1,6 @@
 """Server (VMs und Container): anlegen, steuern, ändern, löschen, Snapshots, Backups, Konsole."""
 import asyncio
+import ipaddress
 import re
 from datetime import timezone
 from urllib.parse import urlparse
@@ -13,7 +14,7 @@ from websockets.asyncio.client import connect as ws_connect
 from .. import ipam, ops
 from ..agent_client import AgentClient, AgentError
 from ..db import SessionLocal, get_db, session_scope
-from ..models import Guest, Template, User
+from ..models import Guest, IPAddress, IPPool, Template, User
 from ..security import audit, client_ip, current_user, generate_password, guest_for
 from ..tasks import create_task, run_task, submit
 
@@ -258,36 +259,129 @@ def reset_password(guest_id: int, body: PasswordBody, request: Request, user: Us
     return {"password": password}
 
 
-class MacBody(BaseModel):
-    mac: str = Field(max_length=17)
+class NetworkBody(BaseModel):
+    ipv4_pool: str | int = "keep"  # keep | none | <Pool-ID>
+    ipv4_address: str | None = None  # bestimmte Adresse aus dem Pool (optional)
+    ipv6_pool: str | int = "keep"
+    ipv6_address: str | None = None
+    mac: str | None = None  # nur Admin
 
 
-@router.post("/{guest_id}/mac")
-def change_mac(guest_id: int, body: MacBody, request: Request, user: User = Depends(current_user),
-               db: Session = Depends(get_db)):
-    """MAC-Adresse ändern (nur Admin – eine fremde MAC könnte Verkehr anderer Server abgreifen)."""
-    if not user.is_admin:
-        raise HTTPException(403, "Nur Administratoren können die MAC-Adresse ändern")
+def _pick(db: Session, user: User, g: Guest, version: int, choice, address: str | None):
+    """Liefert (Pool, Adresse) für eine neue IP. Wirft HTTPException bei ungültiger Wahl."""
+    pool = db.get(IPPool, int(choice)) if str(choice).isdigit() else None
+    if not pool or (pool.admin_only and not user.is_admin):
+        raise HTTPException(400, "IP-Pool nicht gefunden")
+    if ipam.version_of(pool) != version:
+        raise HTTPException(400, f"{pool.name} ist kein IPv{version}-Pool")
+    if not ops.pool_fits_node(pool, g.node):
+        raise HTTPException(400, f"Pool {pool.name} ist auf Node {g.node.name} nicht verfügbar")
+    if address:
+        try:
+            address = str(ipaddress.ip_address(address.strip()))
+        except ValueError:
+            raise HTTPException(400, f"Ungültige Adresse: {address}")
+        if not ipam.contains(pool, address):
+            raise HTTPException(400, f"{address} gehört nicht zum Pool {pool.name}")
+        if pool.gateway and address == pool.gateway:
+            raise HTTPException(400, f"{address} ist das Gateway des Pools")
+        row = db.scalar(select(IPAddress).where(IPAddress.pool_id == pool.id, IPAddress.address == address))
+        if row and row.guest_id != g.id:
+            raise HTTPException(400, f"{address} ist bereits vergeben oder reserviert")
+        return pool, address
+    free = ipam.free_address(db, pool)
+    if not free:
+        raise HTTPException(400, f"Pool {pool.name} hat keine freien Adressen mehr")
+    return pool, free
+
+
+@router.put("/{guest_id}/network")
+def change_network(guest_id: int, body: NetworkBody, request: Request, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)):
+    """IP-Adressen tauschen, Pool wechseln (auch geroutet <-> Bridge) und MAC ändern.
+    Neue Adressen werden sofort reserviert, alte erst nach erfolgreichem Umbau freigegeben."""
     g = guest_for(db, user, guest_id)
-    mac = ipam.normalize_mac(body.mac)
+    if body.mac and not user.is_admin:
+        raise HTTPException(403, "Nur Administratoren können die MAC-Adresse ändern")
+    mac = ipam.normalize_mac(body.mac) if body.mac else None
     _ensure_ready(g)
-    if mac == g.mac:
-        return {"task_id": None}
-    if db.scalar(select(Guest.id).where(Guest.mac == mac, Guest.id != g.id)):
-        raise HTTPException(400, "Diese MAC-Adresse nutzt bereits ein anderer Server")
-    payload = {"mac": mac, "hostname": g.hostname, "ips": [ipam.ip_spec(ip, g.node) for ip in g.ips],
-               "dns": ipam.pool_dns(g.ips[0].pool if g.ips else None)}
-    task = create_task(db, user.id, "mac", f"{g.name} (#{g.vmid}): {g.mac} → {mac}", g.node_id, g.id)
-    audit(db, user, "guest-mac", f"#{g.vmid} {g.mac} -> {mac}", client_ip(request))
-    db.commit()
+    with ipam.alloc_lock:
+        old_rows = list(g.ips)
+        keep, drop, wanted = [], [], []
+        choices = ((4, body.ipv4_pool, body.ipv4_address), (6, body.ipv6_pool, body.ipv6_address))
+        for version, choice, address in choices:
+            current = [ip for ip in old_rows if ipam.version_of(ip.pool) == version]
+            if choice == "keep":
+                keep += current
+                continue
+            if choice not in ("none", "", None):
+                pool, address = _pick(db, user, g, version, choice, address)
+                same = [ip for ip in current if ip.pool_id == pool.id and ip.address == address]
+                if same:
+                    keep += same
+                    current = [ip for ip in current if ip not in same]
+                else:
+                    wanted.append((pool, address))
+            drop += current
+        pools = [ip.pool for ip in keep] + [p for p, _ in wanted]
+        bridges = {p.bridge for p in pools if not ipam.is_routed(p)}
+        if len({ipam.is_routed(p) for p in pools}) > 1 or len(bridges) > 1:
+            raise HTTPException(400, "Alle IPs eines Servers müssen im selben Modus sein (geroutet bzw. dieselbe Bridge)")
+        if any(ipam.is_routed(p) and ipam.version_of(p) == 6 for p in pools):
+            raise HTTPException(400, "Geroutete Pools unterstützen nur IPv4")
+        ops.check_quota(db, g.owner, ips=len(keep) + len(wanted), exclude_guest=g.id)
+        if not mac:
+            fixed = [ipam.pool_macs(p).get(a) for p, a in wanted]
+            mac = next((m for m in fixed if m), g.mac)
+        if db.scalar(select(Guest.id).where(Guest.mac == mac, Guest.id != g.id)):
+            raise HTTPException(400, f"Die MAC {mac} nutzt bereits ein anderer Server")
+        if not wanted and not drop and mac == g.mac:
+            return {"task_id": None}
+        new_rows = []
+        for pool, address in wanted:
+            existing = db.scalar(select(IPAddress).where(IPAddress.pool_id == pool.id, IPAddress.address == address))
+            row = existing or IPAddress(pool_id=pool.id, address=address)
+            row.guest_id, row.reserved, row.note = g.id, False, ""
+            db.add(row)
+            new_rows.append(row)
+        for row in drop:
+            row.guest_id, row.reserved, row.note = None, True, f"wird freigegeben (Umbau #{g.vmid})"
+        db.flush()
+        final = sorted(keep + new_rows, key=lambda r: ipam.version_of(r.pool))
+        first = final[0].pool if final else None
+        routed = bool(first and ipam.is_routed(first))
+        bridge = ipam.ROUTED_BRIDGE if routed else first.bridge if first else ops.default_bridge(g.node)
+        payload = {"mac": mac, "hostname": g.hostname, "routed": routed, "bridge": bridge,
+                   "ips": [ipam.ip_spec(r, g.node) for r in final], "dns": ipam.pool_dns(first)}
+        summary = ", ".join(r.address for r in final) or "DHCP"
+        task = create_task(db, user.id, "network", f"{g.name} (#{g.vmid}): {summary}", g.node_id, g.id)
+        audit(db, user, "guest-network", f"#{g.vmid} -> {summary}, MAC {mac}", client_ip(request))
+        db.commit()
+    new_ids, drop_ids = [r.id for r in new_rows], [r.id for r in drop]
 
-    def after(_result, gid=g.id, new=mac):
+    def after(_result, gid=g.id):
         with session_scope() as s:
-            s.get(Guest, gid).mac = new
+            s.get(Guest, gid).mac = mac
+            for rid in drop_ids:
+                row = s.get(IPAddress, rid)
+                if row:
+                    s.delete(row)
         from .extras import push_firewall
-        push_firewall(gid)  # Firewall/Spoofing-Schutz hängt an der MAC
+        push_firewall(gid)
 
-    submit(run_task(task.id, ops.op_job(task.id, g.id, "POST", "/guests/{name}/mac", payload, after)))
+    def rollback(_msg, gid=g.id):
+        with session_scope() as s:
+            for rid in new_ids:
+                row = s.get(IPAddress, rid)
+                if row:
+                    s.delete(row)
+            for rid in drop_ids:
+                row = s.get(IPAddress, rid)
+                if row:
+                    row.guest_id, row.reserved, row.note = gid, False, ""
+
+    submit(run_task(task.id, ops.op_job(task.id, g.id, "POST", "/guests/{name}/network", payload, after),
+                    on_error=rollback))
     return {"task_id": task.id}
 
 
