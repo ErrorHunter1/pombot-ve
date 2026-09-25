@@ -55,7 +55,7 @@ Version: $VERSION
 Architecture: all
 Maintainer: $MAINTAINER
 Installed-Size: 0
-Depends: python3 (>= 3.10), python3-venv, openssl, curl, ca-certificates, qemu-system-x86, qemu-utils, libvirt-daemon-system, libvirt-clients, lxc, uidmap, wget, gnupg, xorriso, e2fsprogs, bridge-utils, iproute2, nftables, tar
+Depends: python3 (>= 3.10), python3-venv, openssl, curl, ca-certificates, qemu-system-x86, qemu-utils, libvirt-daemon-system, libvirt-clients, lxc, uidmap, wget, gnupg, xorriso, e2fsprogs, bridge-utils, iproute2, nftables, tar, rclone, nfs-common, cifs-utils
 Recommends: lxcfs, lxc-templates
 Section: admin
 Priority: optional

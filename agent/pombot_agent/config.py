@@ -3,7 +3,7 @@ import ipaddress
 import os
 from pathlib import Path
 
-VERSION = "0.4.3"
+VERSION = "0.5.0"
 
 
 def _load_env(path: str) -> None:

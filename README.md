@@ -169,6 +169,9 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Snapshots** (erstellen, zurückspielen, löschen) und **Backups** (erstellen, wiederherstellen, löschen)
 - **Zeitgesteuerte Backups** pro Server (täglich/wöchentlich, Uhrzeit, Anzahl aufzubewahrender Backups);
   verpasste Termine werden nachgeholt, pro Node läuft immer nur ein automatisches Backup gleichzeitig
+- **Externe Backup-Speicher:** SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2,
+  Wasabi, MinIO), NFS und SMB – für manuelle und zeitgesteuerte Backups, Wiederherstellen direkt vom Speicher,
+  Verbindungstest im Adminbereich (Einstellungen → Backup-Speicher)
 - **Firewall pro Server** (nftables auf dem Node): Regeln für ein-/ausgehend, TCP/UDP/ICMP, Ports und
   Portbereiche, Quell-/Zielnetze, Standardaktion, Vorlagen für SSH/Web/Ping/DNS/Mail
 - **Spoofing-Schutz**: Server können nur mit ihren eigenen IP-Adressen senden (standardmäßig immer aktiv)
@@ -177,8 +180,7 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Aufgaben** mit Live-Log, **Audit-Protokoll** aller Aktionen
 - Hell-/Dunkelmodus, auch auf dem Handy nutzbar
 
-Noch **nicht** enthalten (Ideen für später): Live-Migration zwischen Nodes, Cluster-Storage (Ceph/NFS),
-Backups auf externen Speicher, HA, IPv6-Router-Advertisements.
+In Arbeit: Migration zwischen Nodes, gemeinsamer Speicher (NFS/SMB), IPv6-Router-Advertisements, HA.
 
 ## Entwicklung & Releases
 

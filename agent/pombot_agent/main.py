@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, host, images, isos, kvm, lxc, routed
+from . import console, firewall, host, images, isos, kvm, lxc, remote, routed
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -369,6 +369,41 @@ def firewall_put(name: str, cfg: dict):
 @app.delete("/guests/{name}/firewall", dependencies=[Depends(auth)])
 def firewall_delete(name: str):
     firewall.remove(check_name(name))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Externe Backup-Speicher
+
+class RemoteBody(BaseModel):
+    target: dict
+    sub: str = ""
+    file: str = ""
+    delete_local: bool = False
+
+
+@app.post("/remote/test", dependencies=[Depends(auth)])
+def remote_test(body: RemoteBody):
+    return remote.test(body.target)
+
+
+@app.post("/remote/list", dependencies=[Depends(auth)])
+def remote_list(body: RemoteBody):
+    return remote.list_files(body.target, body.sub)
+
+
+@app.post("/remote/upload", dependencies=[Depends(auth)])
+def remote_upload(body: RemoteBody):
+    return job_response(start_job("upload", None, remote.upload, body.target, body.file, body.sub, body.delete_local))
+
+
+@app.post("/remote/fetch", dependencies=[Depends(auth)])
+def remote_fetch(body: RemoteBody):
+    return job_response(start_job("fetch", None, remote.fetch, body.target, body.sub, body.file))
+
+
+@app.post("/remote/delete", dependencies=[Depends(auth)])
+def remote_delete(body: RemoteBody):
+    remote.delete(body.target, body.sub, body.file)
     return {"ok": True}
 
 

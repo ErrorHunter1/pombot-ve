@@ -162,6 +162,24 @@ class FirewallConfig(Base):
             return []
 
 
+class BackupTarget(Base):
+    """Externer Backup-Speicher (SFTP, S3, NFS, SMB). Zugangsdaten stehen in config_json."""
+    __tablename__ = "backup_targets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    type: Mapped[str] = mapped_column(String(8))  # sftp | s3 | nfs | smb
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    user_visible: Mapped[bool] = mapped_column(Boolean, default=False)  # auch Benutzer dürfen hierhin sichern
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    @property
+    def config(self) -> dict:
+        try:
+            return json.loads(self.config_json or "{}")
+        except ValueError:
+            return {}
+
+
 class BackupSchedule(Base):
     """Zeitgesteuerte Backups eines Servers (Uhrzeit = Serverzeit des Panels)."""
     __tablename__ = "backup_schedules"
@@ -172,6 +190,8 @@ class BackupSchedule(Base):
     hour: Mapped[int] = mapped_column(Integer, default=3)
     minute: Mapped[int] = mapped_column(Integer, default=0)
     keep: Mapped[int] = mapped_column(Integer, default=7)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("backup_targets.id", ondelete="SET NULL"))
+    keep_local: Mapped[bool] = mapped_column(Boolean, default=False)  # lokale Kopie nach dem Hochladen behalten
     last_run: Mapped[datetime | None] = mapped_column(DateTime)
     last_status: Mapped[str | None] = mapped_column(String(16))
 

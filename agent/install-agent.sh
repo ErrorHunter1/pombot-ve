@@ -58,7 +58,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients \
-  lxc lxcfs uidmap wget gnupg xorriso e2fsprogs bridge-utils iproute2 nftables \
+  lxc lxcfs uidmap wget gnupg xorriso e2fsprogs bridge-utils iproute2 nftables rclone nfs-common cifs-utils \
   python3 python3-venv openssl curl ca-certificates tar >/dev/null
 apt-get install -y -qq lxc-templates >/dev/null 2>&1 || true
 fi

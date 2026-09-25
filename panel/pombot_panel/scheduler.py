@@ -6,9 +6,8 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
-from .agent_client import AgentClient
 from .db import session_scope
-from .models import BackupSchedule, Guest
+from .models import BackupSchedule, BackupTarget, Guest
 
 log = logging.getLogger("pombot.scheduler")
 # Pro Node läuft immer nur ein automatisches Backup gleichzeitig, um die Festplatten zu schonen.
@@ -40,25 +39,20 @@ def _set_status(guest_id: int, status: str) -> None:
             s.last_status = status
 
 
-async def _auto_backup(task_id: int, guest_id: int, node_id: int, keep: int) -> None:
-    from . import ops
-    from .tasks import task_log
+async def _auto_backup(task_id: int, guest_id: int, node_id: int, keep: int, target_id: int | None,
+                       keep_local: bool) -> None:
+    from . import backup_targets, ops
 
+    with session_scope() as db:
+        g = db.get(Guest, guest_id)
+        t = db.get(BackupTarget, target_id) if target_id else None
+        target, sub = (backup_targets.payload(t) if t else None), backup_targets.subdir(g)
     async with _NODE_LOCKS[node_id]:
-        await ops.op_job(task_id, guest_id, "POST", "/guests/{name}/backups?auto=true")
-        with session_scope() as db:
-            g = db.get(Guest, guest_id)
-            client, name = AgentClient.for_node(g.node), g.agent_name
-        backups = await client.arequest("GET", f"/backups?name={name}")
-        autos = sorted((b for b in backups if b.get("auto")), key=lambda b: b["created"], reverse=True)
-        for old in autos[keep:]:
-            await client.arequest("DELETE", f"/backups/{old['file']}")
-            task_log(task_id, f"Altes automatisches Backup gelöscht: {old['file']}")
-        task_log(task_id, f"Aufbewahrt: {min(len(autos), keep)} von maximal {keep} automatischen Backups.")
+        await ops.op_backup(task_id, guest_id, target, sub, keep_local=keep_local, auto=True, keep=keep)
     _set_status(guest_id, "ok")
 
 
-def _collect_due() -> list[tuple[int, int, int, int]]:
+def _collect_due() -> list[tuple]:
     from .tasks import create_task
 
     now = datetime.now().replace(microsecond=0)
@@ -72,7 +66,7 @@ def _collect_due() -> list[tuple[int, int, int, int]]:
                 continue
             s.last_run, s.last_status = now, "running"
             task = create_task(db, g.owner_id, "backup-auto", f"{g.name} (#{g.vmid})", g.node_id, g.id)
-            due.append((task.id, g.id, g.node_id, s.keep))
+            due.append((task.id, g.id, g.node_id, s.keep, s.target_id, s.keep_local))
     return due
 
 
@@ -90,9 +84,9 @@ async def scheduler_loop() -> None:
             except Exception:  # noqa: BLE001
                 log.exception("Zertifikatsprüfung fehlgeschlagen")
         try:
-            for task_id, guest_id, node_id, keep in _collect_due():
+            for task_id, guest_id, node_id, keep, target_id, keep_local in _collect_due():
                 log.info("Starte automatisches Backup für Server %s", guest_id)
-                t = asyncio.create_task(run_task(task_id, _auto_backup(task_id, guest_id, node_id, keep),
+                t = asyncio.create_task(run_task(task_id, _auto_backup(task_id, guest_id, node_id, keep, target_id, keep_local),
                                                  on_error=lambda _msg, gid=guest_id: _set_status(gid, "error")))
                 _RUNNING.add(t)
                 t.add_done_callback(_RUNNING.discard)

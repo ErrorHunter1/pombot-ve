@@ -12,6 +12,7 @@ from ..agent_client import AgentClient, AgentError
 from ..config import settings
 from ..db import get_db, session_scope
 from ..models import BackupSchedule, FirewallConfig, Guest, User, now
+from .. import backup_targets
 from ..scheduler import next_run
 from ..security import audit, client_ip, current_user, guest_for
 
@@ -137,10 +138,11 @@ def _agent_put(g: Guest, fw: FirewallConfig) -> None:
 def schedule_dict(s: BackupSchedule | None) -> dict:
     if not s:
         return {"enabled": False, "frequency": "daily", "weekday": 6, "hour": 3, "minute": 0, "keep": 7,
+                "target_id": None, "keep_local": False,
                 "last_run": None, "last_status": None, "next_run": None, "exists": False}
     nxt = next_run(s) if s.enabled else None
     return {"enabled": s.enabled, "frequency": s.frequency, "weekday": s.weekday, "hour": s.hour,
-            "minute": s.minute, "keep": s.keep, "exists": True,
+            "minute": s.minute, "keep": s.keep, "exists": True, "target_id": s.target_id, "keep_local": s.keep_local,
             "last_run": s.last_run.isoformat() if s.last_run else None, "last_status": s.last_status,
             "next_run": nxt.isoformat() if nxt else None}
 
@@ -152,6 +154,8 @@ class ScheduleBody(BaseModel):
     hour: int = Field(ge=0, le=23)
     minute: int = Field(ge=0, le=59)
     keep: int = Field(ge=1, le=60)
+    target_id: int | None = None
+    keep_local: bool = False
 
 
 @router.get("/{guest_id}/backup-schedule")
@@ -159,6 +163,7 @@ def get_schedule(guest_id: int, user: User = Depends(current_user), db: Session 
     g = guest_for(db, user, guest_id)
     data = schedule_dict(db.get(BackupSchedule, g.id))
     data["max_keep"] = 60 if user.is_admin else settings.max_auto_backups
+    data["targets"] = [{"id": t.id, "name": t.name, "type": t.type} for t in backup_targets.visible(db, user)]
     return data
 
 
@@ -169,6 +174,7 @@ def put_schedule(guest_id: int, body: ScheduleBody, request: Request, user: User
     if not user.is_admin and body.keep > settings.max_auto_backups:
         raise HTTPException(400, f"Es können maximal {settings.max_auto_backups} automatische Backups "
                                  "aufbewahrt werden")
+    backup_targets.get_visible(db, user, body.target_id)  # prüft Berechtigung
     s = db.get(BackupSchedule, g.id)
     if not s:
         s = BackupSchedule(guest_id=g.id)

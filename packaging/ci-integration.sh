@@ -119,6 +119,50 @@ wait_task "$TID" 900
 api GET "/api/guests/$GID/snapshots" | json '[s["name"] for s in d]'
 end
 
+step "Externe Backup-Speicher bereitstellen (SFTP, S3/MinIO, NFS, SMB)"
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nfs-kernel-server samba >/dev/null
+# SFTP: lokaler Benutzer mit Passwort
+sudo useradd -m -s /bin/bash pbbackup && echo 'pbbackup:SftpTest12345' | sudo chpasswd
+printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/00-pbtest.conf >/dev/null
+sudo systemctl restart ssh || sudo systemctl start ssh
+# S3: MinIO im Docker-Container
+docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=pbminio -e MINIO_ROOT_PASSWORD=pbminio12345 minio/minio server /data >/dev/null
+# NFS
+sudo mkdir -p /srv/nfsbackup
+echo "/srv/nfsbackup 127.0.0.1(rw,sync,no_root_squash,no_subtree_check)" | sudo tee -a /etc/exports >/dev/null
+sudo exportfs -ra && sudo systemctl restart nfs-kernel-server
+# SMB
+sudo useradd -M pbsmb && sudo mkdir -p /srv/smbbackup && sudo chown pbsmb /srv/smbbackup
+(echo SmbTest12345; echo SmbTest12345) | sudo smbpasswd -a -s pbsmb
+printf '[pbbackup]\n  path = /srv/smbbackup\n  writable = yes\n  valid users = pbsmb\n' | sudo tee -a /etc/samba/smb.conf >/dev/null
+sudo systemctl restart smbd
+sleep 5
+RCLONE_CONFIG_M_TYPE=s3 RCLONE_CONFIG_M_PROVIDER=Minio RCLONE_CONFIG_M_ENDPOINT=http://127.0.0.1:9000 \
+  RCLONE_CONFIG_M_ACCESS_KEY_ID=pbminio RCLONE_CONFIG_M_SECRET_ACCESS_KEY=pbminio12345 rclone mkdir m:pombot-ci
+end
+
+for KIND in sftp s3 nfs smb; do
+  step "Backup auf $KIND: Test, Sichern, Liste, Wiederherstellen, Löschen"
+  case "$KIND" in
+    sftp) CFG='{"host":"127.0.0.1","port":22,"user":"pbbackup","password":"SftpTest12345","path":"backups"}' ;;
+    s3)   CFG='{"provider":"Minio","endpoint":"http://127.0.0.1:9000","region":"us-east-1","bucket":"pombot-ci","access_key":"pbminio","secret_key":"pbminio12345","path":"pb"}' ;;
+    nfs)  CFG='{"server":"127.0.0.1","export":"/srv/nfsbackup","options":"vers=4,soft","path":"pb"}' ;;
+    smb)  CFG='{"share":"//127.0.0.1/pbbackup","user":"pbsmb","password":"SmbTest12345","version":"3.0","path":"pb"}' ;;
+  esac
+  TGT="$(api POST /api/admin/backup-targets "{\"name\":\"ci-$KIND\",\"type\":\"$KIND\",\"config\":$CFG}" | json 'd["id"]')"
+  api POST "/api/admin/backup-targets/$TGT/test" | tee /tmp/tgt-test.json
+  json 'all(r["ok"] for r in d)' < /tmp/tgt-test.json | grep -q True || fail "Verbindungstest $KIND fehlgeschlagen"
+  wait_task "$(api POST "/api/guests/$GID/backups" "{\"target_id\":$TGT}" | json 'd["task_id"]')" 900
+  FILE="$(api GET "/api/guests/$GID/backups" | json "[b['file'] for b in d['items'] if b['location']==$TGT][0]")"
+  [ -n "$FILE" ] || fail "Backup nicht auf $KIND gefunden"
+  echo "Extern gespeichert: $FILE"
+  api GET "/api/guests/$GID/backups" | json "[b for b in d['items'] if b['location'] is None and b['file']=='$FILE']" | grep -q "\[\]" || fail "Lokale Kopie hätte gelöscht werden sollen"
+  wait_task "$(api POST "/api/guests/$GID/backups/$FILE/restore?target=$TGT" | json 'd["task_id"]')" 900
+  sudo lxc-info -n pv100 -s | grep -q RUNNING || fail "Container läuft nach Wiederherstellung von $KIND nicht"
+  api DELETE "/api/guests/$GID/backups/$FILE?target=$TGT" | grep -q ok || fail "Löschen auf $KIND fehlgeschlagen"
+  end
+done
+
 step "Löschen"
 TID="$(api DELETE "/api/guests/$GID" | json 'd["task_id"]')"
 wait_task "$TID" 300

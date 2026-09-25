@@ -828,6 +828,9 @@ function scheduleCard(g, s) {
         <label class="field"><span>Uhrzeit (Serverzeit)</span><input type="time" name="time" value="${pad(s.hour)}:${pad(s.minute)}" required></label>
         <label class="field"><span>Aufbewahren (Anzahl)</span><input type="number" name="keep" value="${Math.min(s.keep, s.max_keep)}" min="1" max="${s.max_keep}"></label>
       </div>
+      ${(s.targets || []).length ? `<div class="row"><label class="field"><span>Speicherort</span><select name="target_id"><option value="">Lokal auf dem Node</option>
+        ${s.targets.map((t) => `<option value="${t.id}" ${t.id === s.target_id ? "selected" : ""}>${esc(t.name)} (${esc(t.type.toUpperCase())})</option>`).join("")}</select></label>
+        <label class="check" style="align-self:end"><input type="checkbox" name="keep_local" ${s.keep_local ? "checked" : ""}><span>Zusätzlich lokal behalten</span></label></div>` : ""}
       <p class="muted small" style="margin-top:0">Sind mehr automatische Backups vorhanden als eingestellt, werden die ältesten gelöscht. Manuelle Backups bleiben unberührt.
         ${g.type === "lxc" ? "Container werden für das Backup kurz gestoppt." : "VMs laufen während des Backups weiter."}</p>
       ${s.exists ? `<p class="small" style="margin-top:0">Nächstes Backup: <strong>${s.next_run ? fmtDate(s.next_run) : "–"}</strong> · Letzter Lauf: ${s.last_status ? fmtDate(s.last_run) + " " + status : "noch keiner"}</p>` : ""}
@@ -846,44 +849,135 @@ function bindSchedule(g) {
     const [hour, minute] = sf.time.value.split(":").map(Number);
     await api(`/api/guests/${g.id}/backup-schedule`, { method: "PUT", body: {
       enabled: sf.enabled.checked, frequency: sf.frequency.value, weekday: +sf.weekday.value, hour, minute, keep: +sf.keep.value,
+      target_id: sf.target_id && sf.target_id.value ? +sf.target_id.value : null, keep_local: !!(sf.keep_local && sf.keep_local.checked),
     } }).then(() => { toast("Zeitplan gespeichert"); route(); }).catch(fail);
   };
 }
 
 async function guestBackups(g, shell, seq) {
-  const [backups, sched] = await Promise.all([
-    g.status === "creating" ? [] : api(`/api/guests/${g.id}/backups`).catch((e) => { toast(e.message, "bad"); return []; }),
+  const [data, sched] = await Promise.all([
+    g.status === "creating" ? { items: [], targets: [] } : api(`/api/guests/${g.id}/backups`).catch((e) => { toast(e.message, "bad"); return { items: [], targets: [] }; }),
     api(`/api/guests/${g.id}/backup-schedule`),
   ]);
   if (isStale(seq)) return;
-  S.handlers.backupCreate = async () => {
-    const ok = await confirmBox("Backup erstellen?", g.type === "lxc"
-      ? "Der Container wird für ein konsistentes Backup kurz gestoppt."
-      : "Die VM läuft während des Backups weiter.", { ok: "Backup starten" });
-    if (!ok) return;
-    const r = await api(`/api/guests/${g.id}/backups`, { method: "POST" });
-    await watchTask(r.task_id, "Backup erstellen");
-    route();
-  };
+  const backups = data.items || [];
+  const targets = sched.targets || [];
+  const q = (b) => (b.location ? `?target=${b.location}` : "");
+  const find = (ds) => backups.find((b) => b.file === ds.file && String(b.location ?? "") === (ds.loc || ""));
+  S.handlers.backupCreate = () => formModal({
+    title: "Backup erstellen",
+    fields: `<label class="field"><span>Speicherort</span><select name="target_id"><option value="">Lokal auf dem Node (${esc(g.node)})</option>
+        ${targets.map((t) => `<option value="${t.id}">${esc(t.name)} (${esc(t.type.toUpperCase())})</option>`).join("")}</select></label>
+      ${targets.length ? `<label class="check"><input type="checkbox" name="keep_local"><span>Bei externem Speicher zusätzlich lokal behalten</span></label>` : ""}
+      <p class="muted small" style="margin:0">${g.type === "lxc" ? "Der Container wird für ein konsistentes Backup kurz gestoppt." : "Die VM läuft während des Backups weiter."}</p>`,
+    submit: "Backup starten",
+    onSubmit: async (d, mm) => {
+      const r = await api(`/api/guests/${g.id}/backups`, { method: "POST", body: { target_id: d.target_id ? +d.target_id : null, keep_local: !!d.keep_local } });
+      mm.close();
+      await watchTask(r.task_id, "Backup erstellen");
+      route();
+    },
+  });
   S.handlers.backupRestore = async (ds) => {
-    if (!(await confirmBox("Backup wiederherstellen?", `Der aktuelle Inhalt des Servers wird durch das Backup <strong>${esc(ds.file)}</strong> ersetzt.`, { danger: true, ok: "Wiederherstellen", requireText: g.vmid }))) return;
-    const r = await api(`/api/guests/${g.id}/backups/${ds.file}/restore`, { method: "POST" });
+    const b = find(ds);
+    if (!(await confirmBox("Backup wiederherstellen?", `Der aktuelle Inhalt des Servers wird durch das Backup <strong>${esc(b.file)}</strong> (${esc(b.location_name)}) ersetzt.${b.location ? " Es wird dafür zuerst auf den Node geladen." : ""}`, { danger: true, ok: "Wiederherstellen", requireText: g.vmid }))) return;
+    const r = await api(`/api/guests/${g.id}/backups/${b.file}/restore${q(b)}`, { method: "POST" });
     await watchTask(r.task_id, "Backup wiederherstellen");
     route();
   };
   S.handlers.backupDelete = async (ds) => {
-    if (!(await confirmBox("Backup löschen?", `<strong>${esc(ds.file)}</strong> wird endgültig gelöscht.`, { danger: true, ok: "Löschen" }))) return;
-    await api(`/api/guests/${g.id}/backups/${ds.file}`, { method: "DELETE" });
+    const b = find(ds);
+    if (!(await confirmBox("Backup löschen?", `<strong>${esc(b.file)}</strong> (${esc(b.location_name)}) wird endgültig gelöscht.`, { danger: true, ok: "Löschen" }))) return;
+    await api(`/api/guests/${g.id}/backups/${b.file}${q(b)}`, { method: "DELETE" });
     toast("Backup gelöscht");
     route();
   };
+  const errors = (data.targets || []).filter((t) => t.error);
   shell(scheduleCard(g, sched) + `<div class="card"><div class="card-head"><h2>Backups</h2><button class="btn primary sm" data-act="backupCreate" ${g.status === "ready" ? "" : "disabled"}>${icon("plus")}Backup jetzt</button></div>
-    ${backups.length ? `<div class="table-wrap"><table><thead><tr><th>Datei</th><th>Erstellt</th><th>Größe</th><th></th></tr></thead><tbody>
-      ${backups.map((b) => `<tr><td class="mono small">${esc(b.file)} ${b.auto ? badge("Automatisch", "plain") : ""}</td><td>${fmtDate(new Date(b.created * 1000).toISOString())}</td><td>${fmtBytes(b.size)}</td>
-        <td class="right nowrap"><button class="btn sm" data-act="backupRestore" data-file="${esc(b.file)}">Wiederherstellen</button>
-        <button class="btn sm danger" data-act="backupDelete" data-file="${esc(b.file)}">Löschen</button></td></tr>`).join("")}
+    ${errors.map((t) => `<div class="alert warn" style="margin:12px 16px 0">Speicher <strong>${esc(t.name)}</strong> nicht erreichbar: ${esc(t.error)}</div>`).join("")}
+    ${backups.length ? `<div class="table-wrap"><table><thead><tr><th>Datei</th><th>Speicherort</th><th>Erstellt</th><th>Größe</th><th></th></tr></thead><tbody>
+      ${backups.map((b) => `<tr><td class="mono small">${esc(b.file)} ${b.auto ? badge("Automatisch", "plain") : ""}</td>
+        <td>${b.location ? badge(b.location_name, "info") : `<span class="small">${esc(b.location_name)}</span>`}</td>
+        <td class="nowrap">${fmtDate(new Date(b.created * 1000).toISOString())}</td><td>${fmtBytes(b.size)}</td>
+        <td class="right nowrap"><button class="btn sm" data-act="backupRestore" data-file="${esc(b.file)}" data-loc="${b.location ?? ""}">Wiederherstellen</button>
+        <button class="btn sm danger" data-act="backupDelete" data-file="${esc(b.file)}" data-loc="${b.location ?? ""}">Löschen</button></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Noch keine Backups vorhanden.</div>`}</div>`);
   bindSchedule(g);
+}
+
+// ------------------------------------------------------------------ Backup-Speicher (Einstellungen)
+
+const TARGET_FIELDS = {
+  sftp: [["host", "Server", "storage.example.de"], ["port", "Port", "22"], ["user", "Benutzer", "u12345"], ["password", "Passwort", "", "secret"],
+    ["private_key", "Privater SSH-Schlüssel (statt Passwort)", "-----BEGIN OPENSSH PRIVATE KEY-----", "secret-area"], ["path", "Ordner", "backups/pombot"]],
+  s3: [["provider", "Anbieter", "", "select:Other=S3-kompatibel (MinIO, R2, B2, Wasabi …)|AWS=Amazon S3|Cloudflare=Cloudflare R2|Wasabi=Wasabi|Minio=MinIO"],
+    ["endpoint", "Endpoint (bei AWS leer lassen)", "https://s3.eu-central-003.backblazeb2.com"], ["region", "Region", "eu-central-1"],
+    ["bucket", "Bucket", "mein-backup-bucket"], ["access_key", "Access Key", ""], ["secret_key", "Secret Key", "", "secret"], ["path", "Ordner im Bucket", "pombot"]],
+  nfs: [["server", "Server", "nas.local"], ["export", "Export", "/srv/backups"], ["options", "Mount-Optionen (optional)", "vers=4,soft"], ["path", "Unterordner", "pombot"]],
+  smb: [["share", "Freigabe", "//nas.local/backups"], ["user", "Benutzer", ""], ["password", "Passwort", "", "secret"], ["domain", "Domäne (optional)", ""],
+    ["version", "SMB-Version", "3.0"], ["path", "Unterordner", "pombot"]],
+};
+
+function targetDialog(t) {
+  const st = { type: t ? t.type : "sftp" };
+  const cfg = t ? t.config : {};
+  const fieldsHtml = (type) => TARGET_FIELDS[type].map(([key, label, ph, kind]) => {
+    if (kind && kind.startsWith("select:")) {
+      const opts = kind.slice(7).split("|").map((o) => o.split("="));
+      return `<label class="field"><span>${label}</span><select name="cfg_${key}">${opts.map(([v, l]) => `<option value="${v}" ${cfg[key] === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
+    }
+    const secretSet = cfg[`${key}_set`];
+    const hint = kind && kind.startsWith("secret") && secretSet ? "gesetzt – leer lassen, um es zu behalten" : ph;
+    if (kind === "secret-area") return `<label class="field"><span>${label}</span><textarea name="cfg_${key}" rows="3" placeholder="${esc(hint)}"></textarea></label>`;
+    return `<label class="field"><span>${label}</span><input type="${kind === "secret" ? "password" : "text"}" name="cfg_${key}" value="${kind ? "" : esc(cfg[key] ?? "")}" placeholder="${esc(hint)}" autocomplete="off"></label>`;
+  }).join("");
+  formModal({
+    title: t ? `Backup-Speicher ${t.name}` : "Backup-Speicher hinzufügen", wide: true,
+    fields: `<div class="row"><label class="field"><span>Name</span><input type="text" name="name" value="${esc(t ? t.name : "")}" placeholder="z. B. Storage Box" required></label>
+        <label class="field"><span>Typ</span><select name="type" id="tgt-type">${["sftp", "s3", "nfs", "smb"].map((x) => `<option value="${x}" ${x === st.type ? "selected" : ""}>${{ sftp: "SFTP / SSH (z. B. Hetzner Storage Box)", s3: "S3-kompatibel", nfs: "NFS", smb: "SMB / CIFS (Windows-Freigabe, NAS)" }[x]}</option>`).join("")}</select></label></div>
+      <div id="tgt-fields">${fieldsHtml(st.type)}</div>
+      <label class="check"><input type="checkbox" name="user_visible" ${t && t.user_visible ? "checked" : ""}><span>Auch Benutzer dürfen hierhin sichern (sonst nur Admins)</span></label>
+      <p class="muted small" style="margin:0">Die Nodes verbinden sich direkt mit dem Speicher. Pro Panel und Server wird ein eigener Unterordner angelegt (<code>pombot-…/pvXXX</code>).</p>`,
+    onReady: (mm) => {
+      $("#tgt-type", mm).onchange = (e) => { $("#tgt-fields", mm).innerHTML = fieldsHtml(e.target.value); };
+    },
+    onSubmit: async (d, mm) => {
+      const body = { name: d.name, type: d.type, user_visible: d.user_visible, config: {} };
+      Object.entries(d).forEach(([k, v]) => { if (k.startsWith("cfg_")) body.config[k.slice(4)] = v; });
+      const saved = await api(t ? `/api/admin/backup-targets/${t.id}` : "/api/admin/backup-targets", { method: t ? "PUT" : "POST", body });
+      mm.close();
+      toast("Gespeichert – teste jetzt die Verbindung");
+      route();
+      return saved;
+    },
+  });
+}
+
+async function settingsBackupTargets(head) {
+  const list = await api("/api/admin/backup-targets");
+  S.handlers.tgtAdd = () => targetDialog(null);
+  S.handlers.tgtEdit = (ds) => targetDialog(list.find((t) => t.id === +ds.id));
+  S.handlers.tgtDelete = async (ds) => {
+    if (!(await confirmBox("Backup-Speicher entfernen?", "Die Backups auf dem Speicher selbst bleiben erhalten. Zeitpläne, die dorthin sichern, sichern danach wieder lokal.", { danger: true, ok: "Entfernen" }))) return;
+    await api(`/api/admin/backup-targets/${ds.id}`, { method: "DELETE" });
+    route();
+  };
+  S.handlers.tgtTest = async (ds, el) => {
+    el.disabled = true;
+    el.innerHTML = `<span class="spinner"></span> Teste …`;
+    const res = await api(`/api/admin/backup-targets/${ds.id}/test`, { method: "POST" }).catch((e) => [{ node: "–", ok: false, error: e.message }]);
+    modal({ title: "Verbindungstest", body: res.map((r) => `<div class="alert ${r.ok ? "" : "bad"}" style="margin-bottom:8px"><strong>${esc(r.node)}:</strong> ${r.ok ? `OK – schreiben, lesen und löschen funktioniert${r.free ? ` · ${fmtBytes(r.free)} frei` : ""}` : esc(r.error)}</div>`).join(""),
+      foot: `<button class="btn" data-close>Schließen</button>` });
+    route();
+  };
+  setMain(head + `<div class="card"><div class="card-head"><h2>Externe Backup-Speicher</h2><button class="btn primary sm" data-act="tgtAdd">${icon("plus")}Speicher hinzufügen</button></div>
+    ${list.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Typ</th><th>Ziel</th><th>Benutzer</th><th></th></tr></thead><tbody>
+      ${list.map((t) => `<tr><td><strong>${esc(t.name)}</strong></td><td><span class="type-tag">${esc(t.type_label)}</span></td><td class="mono small">${esc(t.where)}</td>
+        <td>${t.user_visible ? badge("freigegeben", "info") : `<span class="muted small">nur Admins</span>`}</td>
+        <td class="right nowrap"><button class="btn sm" data-act="tgtTest" data-id="${t.id}">Verbindung testen</button> <button class="btn sm" data-act="tgtEdit" data-id="${t.id}">Bearbeiten</button>
+          <button class="btn sm danger" data-act="tgtDelete" data-id="${t.id}">Entfernen</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">Noch kein externer Speicher. Backups liegen bisher nur lokal auf den Nodes – fällt ein Node aus, sind sie weg.<br><br>
+      Unterstützt: SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2, Wasabi, MinIO), NFS und SMB.</div>`}</div>`);
 }
 
 // ------------------------------------------------------------------ Firewall
@@ -1887,8 +1981,9 @@ async function viewSettings(params, m) {
   const tab = m[1] || "general";
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"]]);
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"]]);
   if (tab === "cloudflare") return settingsCloudflare(head);
+  if (tab === "backups") return settingsBackupTargets(head);
   if (tab === "domain") return settingsDomain(head);
   const s = await api("/api/admin/settings");
   const save = async (body) => {

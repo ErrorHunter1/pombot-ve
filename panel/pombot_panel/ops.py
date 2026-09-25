@@ -290,6 +290,59 @@ async def op_job(task_id: int, guest_id: int, method: str, path: str, payload=No
         after(result)
 
 
+async def op_backup(task_id: int, guest_id: int, target: dict | None, sub: str, keep_local: bool = False,
+                    auto: bool = False, keep: int | None = None) -> dict:
+    """Backup erstellen, optional zu einem externen Speicher hochladen und alte automatische Backups
+    über die Aufbewahrungsanzahl hinaus löschen (am jeweiligen Speicherort)."""
+    client, name = _client_for_guest(guest_id)
+    _set_guest(guest_id, status="busy")
+    try:
+        result = await agent_job(task_id, client, "POST", f"/guests/{name}/backups" + ("?auto=true" if auto else ""))
+        if target:
+            await agent_job(task_id, client, "POST", "/remote/upload",
+                            {"target": target, "file": result["file"], "sub": sub, "delete_local": not keep_local})
+    finally:
+        _set_guest(guest_id, status="ready")
+    if keep and auto:
+        if target:
+            files = await client.arequest("POST", "/remote/list", {"target": target, "sub": sub}, timeout=120)
+            autos = [f for f in files if f.get("auto")]
+            for old in autos[keep:]:
+                await client.arequest("POST", "/remote/delete", {"target": target, "sub": sub, "file": old["file"]})
+                task_log(task_id, f"Altes automatisches Backup gelöscht ({target.get('name')}): {old['file']}")
+        else:
+            backups = await client.arequest("GET", f"/backups?name={name}")
+            autos = sorted((b for b in backups if b.get("auto")), key=lambda b: b["created"], reverse=True)
+            for old in autos[keep:]:
+                await client.arequest("DELETE", f"/backups/{old['file']}")
+                task_log(task_id, f"Altes automatisches Backup gelöscht: {old['file']}")
+        task_log(task_id, f"Aufbewahrt: höchstens {keep} automatische Backups.")
+    return result
+
+
+async def op_restore(task_id: int, guest_id: int, filename: str, target: dict | None, sub: str,
+                     already_local: bool = True) -> None:
+    """Wiederherstellen – bei externem Speicher vorher auf den Node laden und danach wieder aufräumen."""
+    client, name = _client_for_guest(guest_id)
+    _set_guest(guest_id, status="busy")
+    fetched = False
+    try:
+        if target and not already_local:
+            await agent_job(task_id, client, "POST", "/remote/fetch", {"target": target, "sub": sub, "file": filename})
+            fetched = True
+        result = await agent_job(task_id, client, "POST", f"/backups/{filename}/restore")
+        if "state" in result:
+            _set_guest(guest_id, power=result["state"])
+    finally:
+        _set_guest(guest_id, status="ready")
+        if fetched:
+            try:
+                await client.arequest("DELETE", f"/backups/{filename}")
+                task_log(task_id, "Heruntergeladene Kopie wieder gelöscht.")
+            except AgentError:
+                pass
+
+
 # ---------------------------------------------------------------- Nodes
 
 def decode_join(code: str) -> dict:

@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect as ws_connect
 
-from .. import ipam, ops
+from .. import backup_targets, ipam, ops
 from ..agent_client import AgentClient, AgentError
 from ..db import SessionLocal, get_db, session_scope
 from ..models import Guest, IPAddress, IPPool, Node, Template, User
@@ -534,58 +534,107 @@ def rollback_snapshot(guest_id: int, snap: str, request: Request, user: User = D
 
 def _backup_name_ok(g: Guest, filename: str) -> None:
     pattern = rf"^{g.agent_name}-(kvm|lxc)-\d{{8}}-\d{{6}}(-auto)?\.tar(\.gz)?$"
-    if not re.match(pattern, filename) or filename not in {b["file"] for b in _own_backups(g)}:
+    if not re.match(pattern, filename):
         raise HTTPException(404, "Backup nicht gefunden")
+
+
+def _since(g: Guest) -> float:
+    return g.created_at.replace(tzinfo=timezone.utc).timestamp() - 60
 
 
 def _own_backups(g: Guest) -> list[dict]:
     """Nur Backups, die nach dem Anlegen dieses Servers entstanden sind (Schutz vor Altlasten mit gleicher VMID)."""
-    since = g.created_at.replace(tzinfo=timezone.utc).timestamp() - 60
     backups = _call(lambda: _agent(g).request("GET", f"/backups?name={g.agent_name}"))
-    return [b for b in backups if b["created"] >= since]
+    return [b for b in backups if b["created"] >= _since(g)]
+
+
+def _remote_backups(g: Guest, t) -> list[dict]:
+    files = _agent(g).request("POST", "/remote/list", {"target": backup_targets.payload(t), "sub": backup_targets.subdir(g)},
+                              timeout=120)
+    return [f for f in files if f["created"] >= _since(g)]
 
 
 @router.get("/{guest_id}/backups")
 def list_backups(guest_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return _own_backups(guest_for(db, user, guest_id))
+    """Lokale und externe Backups eines Servers. `targets` enthält je Speicher ggf. eine Fehlermeldung."""
+    g = guest_for(db, user, guest_id)
+    items = [{**b, "location": None, "location_name": f"Lokal ({g.node.name})"} for b in _own_backups(g)]
+    targets = []
+    for t in backup_targets.visible(db, user):
+        try:
+            for f in _remote_backups(g, t):
+                items.append({**f, "location": t.id, "location_name": t.name})
+            targets.append({"id": t.id, "name": t.name, "type": t.type})
+        except AgentError as exc:
+            targets.append({"id": t.id, "name": t.name, "type": t.type, "error": str(exc)})
+    items.sort(key=lambda b: b["created"], reverse=True)
+    return {"items": items, "targets": targets}
+
+
+class BackupBody(BaseModel):
+    target_id: int | None = None  # None = lokal auf dem Node
+    keep_local: bool = False       # bei externem Ziel zusätzlich lokal behalten
 
 
 @router.post("/{guest_id}/backups")
-def create_backup(guest_id: int, request: Request, user: User = Depends(current_user),
-                  db: Session = Depends(get_db)):
+def create_backup(guest_id: int, request: Request, body: BackupBody | None = None,
+                  user: User = Depends(current_user), db: Session = Depends(get_db)):
+    body = body or BackupBody()
     g = guest_for(db, user, guest_id)
     _ensure_ready(g)
+    target = backup_targets.get_visible(db, user, body.target_id)
     if not user.is_admin:
-        if len([b for b in _own_backups(g) if not b.get("auto")]) >= USER_BACKUP_LIMIT:
-            raise HTTPException(400, f"Maximal {USER_BACKUP_LIMIT} Backups pro Server – bitte alte löschen")
-    task = create_task(db, user.id, "backup", f"{g.name} (#{g.vmid})", g.node_id, g.id)
-    audit(db, user, "backup-create", f"#{g.vmid}", client_ip(request))
+        existing = list_backups(guest_id, user, db)["items"]
+        if len([b for b in existing if not b.get("auto")]) >= USER_BACKUP_LIMIT:
+            raise HTTPException(400, f"Maximal {USER_BACKUP_LIMIT} manuelle Backups pro Server – bitte alte löschen")
+    where = target.name if target else "lokal"
+    task = create_task(db, user.id, "backup", f"{g.name} (#{g.vmid}) → {where}", g.node_id, g.id)
+    audit(db, user, "backup-create", f"#{g.vmid} → {where}", client_ip(request))
     db.commit()
-    submit(run_task(task.id, ops.op_job(task.id, g.id, "POST", "/guests/{name}/backups")))
+    tp = backup_targets.payload(target) if target else None
+    submit(run_task(task.id, ops.op_backup(task.id, g.id, tp, backup_targets.subdir(g), body.keep_local)))
     return {"task_id": task.id}
 
 
 @router.delete("/{guest_id}/backups/{filename}")
-def delete_backup(guest_id: int, filename: str, request: Request, user: User = Depends(current_user),
-                  db: Session = Depends(get_db)):
+def delete_backup(guest_id: int, filename: str, request: Request, target: int | None = None,
+                  user: User = Depends(current_user), db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
     _backup_name_ok(g, filename)
-    _call(lambda: _agent(g).request("DELETE", f"/backups/{filename}"))
-    audit(db, user, "backup-delete", f"#{g.vmid} {filename}", client_ip(request))
+    t = backup_targets.get_visible(db, user, target)
+    if t:
+        if filename not in {f["file"] for f in _call(lambda: _remote_backups(g, t))}:
+            raise HTTPException(404, "Backup nicht gefunden")
+        _call(lambda: _agent(g).request("POST", "/remote/delete", {"target": backup_targets.payload(t),
+                                                                     "sub": backup_targets.subdir(g), "file": filename}))
+    else:
+        if filename not in {b["file"] for b in _own_backups(g)}:
+            raise HTTPException(404, "Backup nicht gefunden")
+        _call(lambda: _agent(g).request("DELETE", f"/backups/{filename}"))
+    audit(db, user, "backup-delete", f"#{g.vmid} {filename} ({t.name if t else 'lokal'})", client_ip(request))
     db.commit()
     return {"ok": True}
 
 
 @router.post("/{guest_id}/backups/{filename}/restore")
-def restore_backup(guest_id: int, filename: str, request: Request, user: User = Depends(current_user),
-                   db: Session = Depends(get_db)):
+def restore_backup(guest_id: int, filename: str, request: Request, target: int | None = None,
+                   user: User = Depends(current_user), db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
     _ensure_ready(g)
     _backup_name_ok(g, filename)
+    t = backup_targets.get_visible(db, user, target)
+    local = {b["file"] for b in _own_backups(g)}
+    if t:
+        if filename not in {f["file"] for f in _call(lambda: _remote_backups(g, t))}:
+            raise HTTPException(404, "Backup nicht gefunden")
+    elif filename not in local:
+        raise HTTPException(404, "Backup nicht gefunden")
     task = create_task(db, user.id, "restore", f"{g.name}: {filename}", g.node_id, g.id)
-    audit(db, user, "backup-restore", f"#{g.vmid} {filename}", client_ip(request))
+    audit(db, user, "backup-restore", f"#{g.vmid} {filename} ({t.name if t else 'lokal'})", client_ip(request))
     db.commit()
-    submit(run_task(task.id, ops.op_job(task.id, g.id, "POST", f"/backups/{filename}/restore")))
+    tp = backup_targets.payload(t) if t else None
+    submit(run_task(task.id, ops.op_restore(task.id, g.id, filename, tp, backup_targets.subdir(g),
+                                            already_local=filename in local)))
     return {"task_id": task.id}
 
 
