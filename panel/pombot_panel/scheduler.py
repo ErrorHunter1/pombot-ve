@@ -80,7 +80,15 @@ async def scheduler_loop() -> None:
     from .tasks import _RUNNING, run_task
 
     await asyncio.sleep(15)
+    last_tls_check = 0.0
     while True:
+        if asyncio.get_running_loop().time() - last_tls_check > 12 * 3600:
+            last_tls_check = asyncio.get_running_loop().time()
+            from .routers.admin import renew_if_needed
+            try:
+                await asyncio.to_thread(renew_if_needed)
+            except Exception:  # noqa: BLE001
+                log.exception("Zertifikatsprüfung fehlgeschlagen")
         try:
             for task_id, guest_id, node_id, keep in _collect_due():
                 log.info("Starte automatisches Backup für Server %s", guest_id)

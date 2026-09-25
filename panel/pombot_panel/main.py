@@ -5,14 +5,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import scheduler, tasks
+from . import runtime, scheduler, tasks
 from .config import settings
 from .db import SessionLocal, migrate
-from .routers import auth, extras, guests, nodes, pools, system, users
+from .routers import admin, auth, extras, guests, nodes, pools, system, users
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -24,6 +24,7 @@ async def lifespan(_: FastAPI):
     migrate()
     with SessionLocal() as db:
         system.seed_templates(db)
+        runtime.load(db)  # im Adminbereich gespeicherte Einstellungen
     tasks.LOOP = asyncio.get_running_loop()
     tasks.mark_stale_tasks()
     poller = asyncio.create_task(tasks.poll_loop())
@@ -54,7 +55,7 @@ async def csrf_and_headers(request: Request, call_next):
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie="pombot_session",
                    max_age=7 * 24 * 3600, same_site="lax", https_only=settings.https)
 
-for r in (auth.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
+for r in (auth.router, admin.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
     app.include_router(r)
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -62,7 +63,9 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+    # Versionsnummer an Skript/CSS hängen, damit Browser nach einem Update nicht die alte Version nutzen
+    html = (STATIC / "index.html").read_text(encoding="utf-8").replace("__VERSION__", settings.version)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/console")

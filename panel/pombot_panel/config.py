@@ -15,6 +15,8 @@ def _load_env(path: str) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+# runtime.env (vom Adminbereich geschrieben: Domain, Port, Zertifikat) hat Vorrang vor panel.env
+_load_env(os.path.join(os.environ.get("POMBOT_DATA_DIR", "/var/lib/pombot-panel"), "runtime.env"))
 _load_env(os.environ.get("POMBOT_PANEL_ENV", "/etc/pombot/panel.env"))
 
 
@@ -26,12 +28,22 @@ def _int(name: str, default: int) -> int:
 
 
 class Settings:
-    version = "0.3.0"
+    version = "0.4.0"
     secret_key = os.environ.get("POMBOT_SECRET_KEY", "")
     db_url = os.environ.get("POMBOT_DB_URL", "sqlite:///./pombot-panel.db")
     base_url = os.environ.get("POMBOT_BASE_URL", "http://localhost:8443").rstrip("/")
     agent_src = os.environ.get("POMBOT_AGENT_SRC", str(Path(__file__).resolve().parents[2] / "agent"))
     poll_interval = _int("POMBOT_POLL_INTERVAL", 10)
+    data_dir = os.environ.get("POMBOT_DATA_DIR", "/var/lib/pombot-panel" if os.path.isdir("/var/lib/pombot-panel")
+                              else os.path.abspath("./data"))
+    port = _int("POMBOT_PORT", 8443)
+
+    # Cloudflare & Let's Encrypt (werden im Adminbereich gesetzt)
+    cloudflare_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    acme_email = os.environ.get("POMBOT_ACME_EMAIL", "")
+    panel_domain = os.environ.get("POMBOT_PANEL_DOMAIN", "")
+    acme_enabled = False
+    acme_staging = False
 
     # Discord OAuth2
     discord_client_id = os.environ.get("DISCORD_CLIENT_ID", "")

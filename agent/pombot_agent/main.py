@@ -32,6 +32,12 @@ async def lifespan(_: FastAPI):
             except Exception as exc:  # noqa: BLE001
                 log.error("Firewall konnte nicht geladen werden: %s", exc)
             await asyncio.sleep(60)
+    try:
+        fixed = await asyncio.to_thread(kvm.ensure_serial_consoles)
+        if fixed:
+            log.warning("Serielle Konsole ergänzt bei: %s – wirkt nach Stoppen/Starten der VM", ", ".join(fixed))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Prüfung der VM-Definitionen fehlgeschlagen: %s", exc)
     task = asyncio.create_task(watchdog())
     yield
     task.cancel()

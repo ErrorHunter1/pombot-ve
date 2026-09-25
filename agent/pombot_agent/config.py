@@ -3,7 +3,7 @@ import ipaddress
 import os
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 def _load_env(path: str) -> None:
@@ -34,8 +34,9 @@ LXC_KEYSERVER = os.environ.get("POMBOT_LXC_KEYSERVER", "hkp://keyserver.ubuntu.c
 # CPU-Modell für VMs: auto = host-passthrough auf echter Hardware, kompatibles Modell wenn der Node
 # selbst eine VM ist (Nested Virtualization). Sonst: host-passthrough | host-model | <QEMU-Modell>
 KVM_CPU = os.environ.get("POMBOT_KVM_CPU", "auto")
-# Serielle Konsole für VMs: auto = nur auf echter Hardware, 1 = immer, 0 = nie
-KVM_SERIAL = os.environ.get("POMBOT_KVM_SERIAL", "auto")
+# Serielle Konsole für VMs (1 = an). Muss an bleiben: Debian-/Ubuntu-Cloud-Images erwarten ttyS0 und
+# brechen ohne sie beim Booten mit einer Kernel-Panic ab (im CI mit echten VMs nachgewiesen).
+KVM_SERIAL = os.environ.get("POMBOT_KVM_SERIAL", "1")
 
 
 def _parse_allow(raw: str):

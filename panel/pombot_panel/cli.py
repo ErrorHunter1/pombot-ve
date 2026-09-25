@@ -5,6 +5,7 @@ import sys
 from sqlalchemy import func, select
 
 from . import ops
+from . import runtime
 from .db import SessionLocal, migrate
 from .models import User
 from .routers.system import seed_templates
@@ -33,6 +34,7 @@ def main() -> int:
     migrate()
     with SessionLocal() as db:
         seed_templates(db)
+        runtime.load(db)
         if args.cmd == "create-admin":
             if db.scalar(select(User).where(func.lower(User.username) == args.username.lower())):
                 print(f"Benutzer {args.username} existiert bereits", file=sys.stderr)

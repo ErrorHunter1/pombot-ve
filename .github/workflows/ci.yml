@@ -50,6 +50,8 @@ jobs:
           sudo nft list ruleset || true
 
   kvm-matrix:
+    # Vergleicht VM-Einstellungen bei verschachtelter Virtualisierung – nur bei manuellem Start
+    if: github.event_name == 'workflow_dispatch'
     needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 60

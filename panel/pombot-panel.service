@@ -7,11 +7,21 @@ Wants=network-online.target
 Type=simple
 User=pombot
 Group=pombot
+# Vorgaben – panel.env und runtime.env (Adminbereich: Domain, Port, Zertifikat) überschreiben sie
+Environment=POMBOT_BIND=0.0.0.0
+Environment=POMBOT_PORT=8443
+Environment=POMBOT_TLS_CERT=/etc/pombot/panel-cert.pem
+Environment=POMBOT_TLS_KEY=/etc/pombot/panel-key.pem
 EnvironmentFile=/etc/pombot/panel.env
+EnvironmentFile=-/var/lib/pombot-panel/runtime.env
 WorkingDirectory=/opt/pombot/panel
-ExecStart=/opt/pombot/panel/venv/bin/uvicorn pombot_panel.main:app --app-dir /opt/pombot/panel --host ${POMBOT_BIND} --port ${POMBOT_PORT} --ssl-keyfile /etc/pombot/panel-key.pem --ssl-certfile /etc/pombot/panel-cert.pem --proxy-headers --forwarded-allow-ips 127.0.0.1
+ExecStart=/opt/pombot/panel/venv/bin/uvicorn pombot_panel.main:app --app-dir /opt/pombot/panel --host ${POMBOT_BIND} --port ${POMBOT_PORT} --ssl-keyfile ${POMBOT_TLS_KEY} --ssl-certfile ${POMBOT_TLS_CERT} --proxy-headers --forwarded-allow-ips 127.0.0.1
+# Neustart auch nach absichtlichem Beenden (z. B. nach neuem Zertifikat aus dem Adminbereich)
 Restart=always
 RestartSec=3
+# Erlaubt Port 443 ohne root-Rechte
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=full
 PrivateTmp=true

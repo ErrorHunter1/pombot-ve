@@ -32,11 +32,11 @@ und auf den Server kopieren (das Repository ist privat, z. B. mit
 
 ```bash
 # Panel (Web-Oberfläche)
-sudo apt install ./pombot-panel_0.3.0_all.deb
+sudo apt install ./pombot-panel_0.4.0_all.deb
 sudo cat /root/pombot-admin.txt          # Adresse + Admin-Passwort
 
 # Node (auch auf demselben Server möglich) – gibt einen Join-Code aus
-sudo apt install ./pombot-agent_0.3.0_all.deb
+sudo apt install ./pombot-agent_0.4.0_all.deb
 ```
 
 `apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Updates: neues Paket
@@ -90,6 +90,23 @@ Bridge, Routen und Proxy-ARP stellt der Dienst `pombot-network` nach jedem Neust
 Für den Bridge-Modus braucht jeder Node eine Linux-Bridge (Standard `vmbr0`). Beim Hinzufügen per SSH kann
 sie automatisch angelegt werden (Backup der alten Konfiguration unter `/etc/pombot/network-backup-*`).
 
+### Adminbereich (Einstellungen)
+
+Unter **Einstellungen** (nur für Admins) lässt sich alles ohne Konsole verwalten:
+
+- **Allgemein:** Registrierung, Standard-Kontingente, DNS-Server, Spoofing-Schutz, Auto-Backup-Limit
+- **Discord-Login:** Client-ID/Secret, erlaubter Discord-Server, automatische Admins (Redirect-URL zum Kopieren)
+- **Cloudflare-DNS:** API-Token hinterlegen, Zonen und DNS-Einträge anlegen/ändern/löschen.
+  Im Netzwerk-Tab eines Servers kann ihm per Klick eine Domain zugewiesen werden (A/AAAA auf seine IPs).
+- **Domain & HTTPS:** Panel unter eigener Domain (z. B. `panel.deinedomain.de`, Port 443) mit
+  **Let's-Encrypt-Zertifikat**. Die Bestätigung läuft über Cloudflare-DNS – Port 80 muss nicht offen sein.
+  Das Zertifikat wird automatisch 30 Tage vor Ablauf verlängert.
+
+Cloudflare-Token: dash.cloudflare.com → Mein Profil → API-Token → Vorlage „DNS-Zone bearbeiten“
+(`Zone → DNS → Bearbeiten`, `Zone → Zone → Lesen`).
+
+Werte aus dem Adminbereich haben Vorrang vor `/etc/pombot/panel.env`.
+
 ### Discord-Login
 
 1. <https://discord.com/developers/applications> → neue Anwendung → **OAuth2**
@@ -115,6 +132,8 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Steuerung:** Starten, Herunterfahren, Neustart, Stopp, Pausieren; Live-Auslastung mit Verlauf
 - **Konsole im Browser:** noVNC für VMs, Terminal (xterm.js) für Container, Root-Shell für Nodes (Admin)
 - **Ressourcen ändern:** CPU, RAM, Festplatte vergrößern (mit Kontingentprüfung)
+- **Netzwerk ändern:** IP tauschen, bestimmte IP wählen, Pool wechseln (geroutet ↔ Bridge), MAC-Adresse setzen;
+  feste MAC pro IP im Pool (`77.90.52.70 bc:24:11:11:dc:25`) für Hoster, die IPs an MACs binden
 - **Snapshots** (erstellen, zurückspielen, löschen) und **Backups** (erstellen, wiederherstellen, löschen)
 - **Zeitgesteuerte Backups** pro Server (täglich/wöchentlich, Uhrzeit, Anzahl aufzubewahrender Backups);
   verpasste Termine werden nachgeholt, pro Node läuft immer nur ein automatisches Backup gleichzeitig

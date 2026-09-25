@@ -70,6 +70,7 @@ const ICONS = {
   menu: "M3 6h18M3 12h18M3 18h18",
   moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
 const discordIcon = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.6 1.3a18.3 18.3 0 0 0-5.5 0L8.6 3a19.7 19.7 0 0 0-4.9 1.5C.6 9.1-.3 13.6.1 18.1a19.9 19.9 0 0 0 6 3l1.3-2a12.9 12.9 0 0 1-2-1l.5-.4a14.2 14.2 0 0 0 12.2 0l.5.4-2 1 1.3 2a19.8 19.8 0 0 0 6-3c.5-5.2-.8-9.7-3.6-13.7zM8.1 15.3c-1.2 0-2.2-1.1-2.2-2.4s1-2.4 2.2-2.4 2.2 1.1 2.2 2.4-1 2.4-2.2 2.4zm7.8 0c-1.2 0-2.2-1.1-2.2-2.4s1-2.4 2.2-2.4 2.2 1.1 2.2 2.4-1 2.4-2.2 2.4z"/></svg>`;
@@ -322,6 +323,7 @@ async function updateSidebar() {
       <a href="#/templates" data-nav="templates">${icon("disk")}Vorlagen</a>
       <a href="#/users" data-nav="users">${icon("users")}Benutzer</a>
       <a href="#/audit" data-nav="audit">${icon("shield")}Protokoll</a>
+      <a href="#/settings" data-nav="settings">${icon("gear")}Einstellungen</a>
     </div>` : ""}
     <div class="nav-section">${admin ? "Ressourcenbaum" : "Meine Server"}</div>
     <div class="nav tree">${tree}</div>`;
@@ -370,6 +372,7 @@ const ROUTES = [
   [/^templates$/, viewTemplates],
   [/^tasks$/, viewTasks],
   [/^audit$/, viewAudit],
+  [/^settings(?:\/(\w+))?$/, viewSettings],
   [/^account$/, viewAccount],
 ];
 
@@ -479,7 +482,7 @@ function taskRows(tasks) {
 const TASK_LABELS = {
   create: "Erstellen", delete: "Löschen", reinstall: "Neu installieren", resize: "Ressourcen ändern",
   snapshot: "Snapshot", "snapshot-delete": "Snapshot löschen", "snapshot-rollback": "Snapshot zurückspielen",
-  network: "Netzwerk ändern", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
+  network: "Netzwerk ändern", domain: "Domain & Zertifikat", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
 };
 
 async function viewDashboard(params, m, silent, seq) {
@@ -727,7 +730,13 @@ async function guestNetwork(g, shell) {
         ? "cloud-init richtet das Netzwerk in der VM automatisch neu ein – Passwort, SSH-Schlüssel und Daten bleiben erhalten."
         : "Das Netzwerk im Container wird automatisch neu geschrieben – Daten bleiben erhalten."}</div>
       <button class="btn primary" data-act="netApply" ${busy ? "disabled" : ""}>Übernehmen</button>
-    </div></div></div>`);
+    </div></div></div>
+    ${admin && g.ips.length ? `<div class="card" style="margin-top:16px;max-width:760px"><div class="card-head"><h2>Domain zuweisen (Cloudflare)</h2></div><div class="card-body">
+      <p class="muted" style="margin-top:0">Legt in Cloudflare einen ${g.ips.some((i) => i.version === 6) ? "A- und AAAA-Eintrag" : "A-Eintrag"} auf ${g.ips.map((i) => `<code>${esc(i.address)}</code>`).join(", ")} an bzw. aktualisiert ihn.</p>
+      <div class="row"><input type="text" id="dns-host" placeholder="web.deinedomain.de" value="${esc(g.hostname.includes(".") ? g.hostname : "")}">
+        <button class="btn" style="flex:none" data-act="guestDns">Eintragen</button></div>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="dns-proxied"><span>Über Cloudflare-Proxy (nur für Webseiten; SSH geht dann nicht über den Namen)</span></label>
+    </div></div>` : ""}`);
 
   const loadFree = async (v) => {
     const sel = $(`#net-pool${v}`).value;
@@ -746,6 +755,12 @@ async function guestNetwork(g, shell) {
     if (mac && $("#net-mac")) $("#net-mac").value = mac;
   });
 
+  S.handlers.guestDns = async () => {
+    const hostname = $("#dns-host").value.trim();
+    if (!hostname) return toast("Bitte einen Hostnamen eingeben");
+    const r = await api(`/api/admin/guests/${g.id}/dns`, { method: "POST", body: { hostname, proxied: $("#dns-proxied").checked } });
+    toast(`DNS gesetzt: ${r.map((x) => `${x.type} ${x.name} → ${x.content}`).join(", ")}`);
+  };
   S.handlers.netApply = async () => {
     const num = (v) => (/^\d+$/.test(v) ? +v : v);
     const body = {
@@ -1682,6 +1697,184 @@ async function viewTemplates() {
         <td>${t.min_disk_gb} GB</td><td>${t.enabled ? badge("Aktiv", "good") : badge("Ausgeblendet")}</td>
         <td class="right nowrap"><button class="btn sm" data-act="editTpl" data-id="${t.id}">Bearbeiten</button> <button class="btn sm danger" data-act="deleteTpl" data-id="${t.id}">Löschen</button></td></tr>`).join("")}
     </tbody></table></div></div>`);
+}
+
+// ------------------------------------------------------------------ Adminbereich: Einstellungen
+
+async function viewSettings(params, m) {
+  const tab = m[1] || "general";
+  const base = "#/settings";
+  const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"]]);
+  if (tab === "cloudflare") return settingsCloudflare(head);
+  if (tab === "domain") return settingsDomain(head);
+  const s = await api("/api/admin/settings");
+  const save = async (body) => {
+    await api("/api/admin/settings", { method: "PUT", body });
+    toast("Gespeichert – gilt sofort");
+    route(true);
+  };
+  if (tab === "discord") {
+    setMain(head + `<div class="grid grid-2"><div class="card"><div class="card-head"><h2>Discord-Login</h2>${s.discord_client_id && s.discord_client_secret_set ? badge("Aktiv", "good") : badge("Nicht eingerichtet")}</div><div class="card-body">
+      <form id="set-form">
+        <label class="field"><span>Client-ID</span><input type="text" name="discord_client_id" value="${esc(s.discord_client_id)}"></label>
+        <label class="field"><span>Client-Secret</span><input type="password" name="discord_client_secret" autocomplete="off" placeholder="${s.discord_client_secret_set ? "gesetzt – leer lassen, um es zu behalten" : ""}"></label>
+        <label class="field"><span>Nur Mitglieder dieses Discord-Servers (Server-ID, optional)</span><input type="text" name="discord_guild_id" value="${esc(s.discord_guild_id)}"></label>
+        <label class="field"><span>Diese Discord-User-IDs werden automatisch Admin (Komma getrennt)</span><input type="text" name="discord_admin_ids" value="${esc(s.discord_admin_ids)}"></label>
+        <button class="btn primary" type="submit">Speichern</button></form></div></div>
+      <div class="card"><div class="card-head"><h2>So richtest du es ein</h2></div><div class="card-body small">
+        <ol style="padding-left:18px;margin:0">
+          <li><a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers/applications</a> → <em>New Application</em></li>
+          <li>Links <em>OAuth2</em> → bei <em>Redirects</em> diese Adresse eintragen:
+            <div class="secret" style="margin:8px 0"><span>${esc(s.discord_redirect_uri)}</span><button class="btn sm" type="button" data-copy="${esc(s.discord_redirect_uri)}">Kopieren</button></div></li>
+          <li><em>Client ID</em> und <em>Client Secret</em> (Reset Secret) hier eintragen und speichern.</li>
+        </ol>
+        <p class="muted" style="margin-bottom:0">Ändert sich die Adresse des Panels (Domain), muss die Redirect-URL bei Discord angepasst werden.</p></div></div></div>`);
+  } else {
+    setMain(head + `<div class="card" style="max-width:860px"><div class="card-body"><form id="set-form">
+      <h3 style="margin:0 0 12px">Anmeldung</h3>
+      <label class="field"><span>Neue Discord-Benutzer</span><select name="registration">
+        <option value="approval" ${s.registration === "approval" ? "selected" : ""}>Müssen von einem Admin freigeschaltet werden</option>
+        <option value="open" ${s.registration === "open" ? "selected" : ""}>Dürfen sofort loslegen</option>
+        <option value="closed" ${s.registration === "closed" ? "selected" : ""}>Keine neuen Konten</option></select></label>
+      <h3 style="margin:18px 0 12px">Standard-Kontingent für neue Benutzer</h3>
+      <div class="row"><label class="field"><span>Server</span><input type="number" name="default_max_guests" value="${s.default_max_guests}" min="0"></label>
+        <label class="field"><span>CPU-Kerne</span><input type="number" name="default_max_cores" value="${s.default_max_cores}" min="0"></label>
+        <label class="field"><span>IP-Adressen</span><input type="number" name="default_max_ips" value="${s.default_max_ips}" min="0"></label></div>
+      <div class="row"><label class="field"><span>RAM (MB)</span><input type="number" name="default_max_memory_mb" value="${s.default_max_memory_mb}" min="0" step="256"></label>
+        <label class="field"><span>Speicher (GB)</span><input type="number" name="default_max_disk_gb" value="${s.default_max_disk_gb}" min="0"></label></div>
+      <h3 style="margin:18px 0 12px">Netzwerk & Sicherheit</h3>
+      <label class="field"><span>Standard-DNS-Server für neue Server</span><input type="text" name="default_dns" value="${esc(s.default_dns)}"></label>
+      <label class="check"><input type="checkbox" name="antispoof" ${s.antispoof ? "checked" : ""}><span>Spoofing-Schutz für neue Server (Server senden nur mit eigenen IPs)</span></label>
+      <label class="field" style="max-width:320px"><span>Max. automatische Backups pro Server (Benutzer)</span><input type="number" name="max_auto_backups" value="${s.max_auto_backups}" min="1"></label>
+      <button class="btn primary" type="submit">Speichern</button></form></div></div>`);
+  }
+  $("#set-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const body = {};
+    for (const el of e.target.elements) {
+      if (!el.name) continue;
+      body[el.name] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value;
+    }
+    await save(body).catch(fail);
+  };
+}
+
+function recordDialog(zone, rec) {
+  const r = rec || { type: "A", name: "", content: "", ttl: 1, proxied: false, priority: null, comment: "" };
+  formModal({
+    title: rec ? `Eintrag bearbeiten – ${zone.name}` : `Neuer DNS-Eintrag – ${zone.name}`,
+    fields: `<div class="row"><label class="field" style="max-width:130px"><span>Typ</span><select name="type">${["A", "AAAA", "CNAME", "TXT", "MX", "SRV", "CAA", "NS", "PTR"].map((t) => `<option ${t === r.type ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+        <label class="field"><span>Name</span><input type="text" name="name" value="${esc(r.name)}" placeholder="www.${esc(zone.name)} oder ${esc(zone.name)}" required></label></div>
+      <label class="field"><span>Inhalt</span><input type="text" name="content" value="${esc(r.content)}" placeholder="IP-Adresse, Ziel-Hostname oder Text" required></label>
+      <div class="row"><label class="field"><span>TTL (1 = automatisch)</span><input type="number" name="ttl" value="${r.ttl || 1}" min="1"></label>
+        <label class="field"><span>Priorität (nur MX/SRV)</span><input type="number" name="priority" value="${r.priority ?? ""}" min="0"></label></div>
+      <label class="field"><span>Kommentar</span><input type="text" name="comment" value="${esc(r.comment || "")}" maxlength="100"></label>
+      <label class="check"><input type="checkbox" name="proxied" ${r.proxied ? "checked" : ""}><span>Über Cloudflare-Proxy (oranges Wölkchen) – nur für A/AAAA/CNAME, nur Web-Verkehr</span></label>`,
+    submit: rec ? "Speichern" : "Anlegen",
+    onSubmit: async (d, mm) => {
+      if (d.priority === null || d.priority === "") delete d.priority;
+      await api(`/api/admin/cloudflare/zones/${zone.id}/records${rec ? `/${rec.id}` : ""}`, { method: rec ? "PUT" : "POST", body: d });
+      mm.close();
+      toast("Gespeichert");
+      route();
+    },
+  });
+}
+
+async function settingsCloudflare(head) {
+  const s = await api("/api/admin/settings");
+  let zones = [], zoneErr = "";
+  if (s.cloudflare_token_set) zones = await api("/api/admin/cloudflare/zones").catch((e) => { zoneErr = e.message; return []; });
+  const zoneId = new URLSearchParams(location.hash.split("?")[1] || "").get("zone") || (zones[0] && zones[0].id);
+  const zone = zones.find((z) => z.id === zoneId);
+  let records = [];
+  if (zone) records = await api(`/api/admin/cloudflare/zones/${zone.id}/records`).catch((e) => { zoneErr = e.message; return []; });
+  S.handlers.cfAdd = () => recordDialog(zone);
+  S.handlers.cfEdit = (ds) => recordDialog(zone, records.find((r) => r.id === ds.id));
+  S.handlers.cfDel = async (ds) => {
+    const r = records.find((x) => x.id === ds.id);
+    if (!(await confirmBox("DNS-Eintrag löschen?", `<code>${esc(r.type)} ${esc(r.name)} → ${esc(r.content)}</code>`, { danger: true, ok: "Löschen" }))) return;
+    await api(`/api/admin/cloudflare/zones/${zone.id}/records/${r.id}`, { method: "DELETE" });
+    route();
+  };
+  S.handlers.cfVerify = async () => { const r = await api("/api/admin/cloudflare/verify", { method: "POST" }); toast(`Token gültig – ${r.zones} Zone(n) gefunden`); route(); };
+  setMain(head + `<div class="grid grid-2" style="margin-bottom:16px">
+    <div class="card"><div class="card-head"><h2>API-Token</h2>${s.cloudflare_token_set ? badge("Hinterlegt", "good") : badge("Fehlt", "warn")}</div><div class="card-body">
+      <form id="cf-form"><label class="field"><span>Cloudflare-API-Token</span><input type="password" name="cloudflare_token" autocomplete="off" placeholder="${s.cloudflare_token_set ? "hinterlegt – leer lassen, um ihn zu behalten" : "Token einfügen"}"></label>
+      <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Speichern</button>${s.cloudflare_token_set ? `<button type="button" class="btn" data-act="cfVerify">Token prüfen</button>` : ""}</div></form></div></div>
+    <div class="card"><div class="card-head"><h2>Token erstellen</h2></div><div class="card-body small">
+      <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">dash.cloudflare.com → Mein Profil → API-Token</a> → <em>Token erstellen</em> → Vorlage <em>„DNS-Zone bearbeiten“</em>.
+      Berechtigungen: <code>Zone → DNS → Bearbeiten</code> und <code>Zone → Zone → Lesen</code>, bei <em>Zonenressourcen</em> die gewünschten Domains wählen.
+      <p class="muted" style="margin-bottom:0">Der Token wird nur im Panel gespeichert und nie wieder angezeigt. Damit kann PomBot DNS-Einträge verwalten, Servern Domains zuweisen und Let's-Encrypt-Zertifikate holen.</p></div></div></div>
+    ${zoneErr ? `<div class="alert bad" style="margin-bottom:16px">${esc(zoneErr)}</div>` : ""}
+    ${s.cloudflare_token_set && zones.length ? `<div class="card"><div class="card-head"><h2>DNS-Einträge</h2>
+        <select id="cf-zone" style="max-width:280px">${zones.map((z) => `<option value="${z.id}" ${z.id === zoneId ? "selected" : ""}>${esc(z.name)}${z.status !== "active" ? ` (${esc(z.status)})` : ""}</option>`).join("")}</select>
+        <button class="btn sm primary" data-act="cfAdd">${icon("plus")}Eintrag</button></div>
+      ${records.length ? `<div class="table-wrap"><table><thead><tr><th>Typ</th><th>Name</th><th>Inhalt</th><th>Proxy</th><th>TTL</th><th></th></tr></thead><tbody>
+        ${records.map((r) => `<tr><td><span class="type-tag">${esc(r.type)}</span></td><td class="mono small">${esc(r.name)}</td>
+          <td class="mono small" style="word-break:break-all;max-width:360px">${esc(r.content)}${r.priority != null && ["MX", "SRV"].includes(r.type) ? ` <span class="muted">(Prio ${r.priority})</span>` : ""}</td>
+          <td>${r.proxied ? badge("Proxy", "warn") : `<span class="muted small">nur DNS</span>`}</td><td class="small">${r.ttl === 1 ? "auto" : r.ttl}</td>
+          <td class="right nowrap"><button class="btn sm" data-act="cfEdit" data-id="${r.id}">Bearbeiten</button> <button class="btn sm danger" data-act="cfDel" data-id="${r.id}">Löschen</button></td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">Keine Einträge in dieser Zone.</div>`}</div>` : ""}`);
+  $("#cf-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const token = e.target.cloudflare_token.value.trim();
+    if (!token) return toast("Bitte einen Token einfügen");
+    await api("/api/admin/settings", { method: "PUT", body: { cloudflare_token: token } });
+    const r = await api("/api/admin/cloudflare/verify", { method: "POST" }).catch((err) => { toast(err.message, "bad"); return null; });
+    if (r) toast(`Token gespeichert – ${r.zones} Zone(n) gefunden`);
+    route();
+  };
+  if ($("#cf-zone")) $("#cf-zone").onchange = (e) => { location.hash = `#/settings/cloudflare?zone=${e.target.value}`; };
+}
+
+async function settingsDomain(head) {
+  const d = await api("/api/admin/domain");
+  const c = d.certificate;
+  const selfSigned = !c || !/Let's Encrypt|\(STAGING\)/i.test(c.issuer);
+  S.handlers.domainReset = async () => {
+    if (!(await confirmBox("Domain entfernen?", "Das Panel ist danach wieder über die IP-Adresse mit dem selbstsignierten Zertifikat erreichbar (Port aus panel.env).", { danger: true, ok: "Zurücksetzen" }))) return;
+    const r = await api("/api/admin/domain/reset", { method: "POST" });
+    toast(r.restarting ? "Panel startet neu …" : "Bitte das Panel neu starten");
+  };
+  setMain(head + `<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>Aktuell</h2></div><div class="card-body"><dl class="kv">
+      <dt>Adresse</dt><dd><a href="${esc(d.base_url)}">${esc(d.base_url)}</a></dd>
+      <dt>Port</dt><dd>${d.port}</dd>
+      <dt>Zertifikat</dt><dd>${d.acme_enabled && c ? `${badge(c.days_left > 14 ? "Let's Encrypt" : "läuft bald ab", c.days_left > 14 ? "good" : "warn")}<div class="small muted">${esc(c.domains.join(", "))} · gültig bis ${fmtDate(c.not_after)} (${c.days_left} Tage) · wird automatisch verlängert</div>`
+        : badge("Selbstsigniert (Browser-Warnung)", "warn")}</dd>
+      <dt>Öffentliche IP</dt><dd class="mono">${esc(d.public_ip || "–")}</dd></dl>
+      ${d.acme_enabled ? `<button class="btn danger" style="margin-top:14px" data-act="domainReset">Domain entfernen</button>` : ""}</div></div>
+    <div class="card"><div class="card-head"><h2>${d.acme_enabled ? "Domain ändern" : "Domain einrichten"}</h2></div><div class="card-body">
+      ${d.cloudflare ? "" : `<div class="alert warn" style="margin-bottom:14px">Zuerst unter <a href="#/settings/cloudflare">Cloudflare-DNS</a> einen API-Token hinterlegen – darüber wird das Zertifikat bestätigt.</div>`}
+      ${d.restart_supported ? "" : `<div class="alert" style="margin-bottom:14px">Hinweis: Das Panel läuft nicht als Systemdienst – nach dem Einrichten bitte selbst neu starten.</div>`}
+      <form id="dom-form">
+        <label class="field"><span>Domain für das Panel</span><input type="text" name="domain" value="${esc(d.domain || "")}" placeholder="panel.deinedomain.de" required></label>
+        <div class="row"><label class="field"><span>Port</span><select name="port"><option value="443" ${d.port === 443 || !d.acme_enabled ? "selected" : ""}>443 (Standard – https://domain)</option><option value="8443" ${d.acme_enabled && d.port === 8443 ? "selected" : ""}>8443</option></select></label>
+          <label class="field"><span>E-Mail für Let's Encrypt (optional)</span><input type="email" name="email" value="${esc(d.acme_email || "")}"></label></div>
+        <label class="check"><input type="checkbox" name="create_dns" checked><span>DNS-Eintrag in Cloudflare automatisch setzen</span></label>
+        <label class="field" id="dom-ip"><span>IP-Adresse des Panels</span><input type="text" name="dns_ip" value="${esc(d.public_ip || "")}"></label>
+        <label class="check"><input type="checkbox" name="staging"><span>Testmodus (Let's-Encrypt-Staging, Zertifikat ist nicht vertrauenswürdig)</span></label>
+        <div class="alert" style="margin-bottom:14px">Ablauf: DNS-Eintrag setzen → Zertifikat per Cloudflare-DNS bestätigen (Port 80 muss <strong>nicht</strong> offen sein) → Panel startet unter der neuen Adresse neu.
+          ${selfSigned ? "" : ""}Vergiss nicht, den gewählten Port in der Firewall zu öffnen und die Discord-Redirect-URL anzupassen.</div>
+        <button class="btn primary" type="submit" ${d.cloudflare ? "" : "disabled"}>Domain einrichten</button></form></div></div></div>`);
+  const f = $("#dom-form");
+  f.create_dns.onchange = () => $("#dom-ip").classList.toggle("hidden", !f.create_dns.checked);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { domain: f.domain.value.trim(), port: +f.port.value, email: f.email.value.trim(), create_dns: f.create_dns.checked,
+      dns_ip: f.dns_ip.value.trim() || null, staging: f.staging.checked };
+    const r = await api("/api/admin/domain", { method: "POST", body }).catch(fail);
+    if (!r) return;
+    const status = await watchTask(r.task_id, `Domain ${body.domain} einrichten`);
+    if (status === "ok") {
+      const url = `https://${body.domain}${body.port === 443 ? "" : ":" + body.port}`;
+      modal({ title: "Fertig", body: `<p style="margin-top:0">Das Panel startet neu und ist gleich erreichbar unter:</p><p><a class="btn primary" href="${esc(url)}">${esc(url)}</a></p>
+        <p class="muted small">Die DNS-Änderung kann einige Minuten brauchen. Passe die Redirect-URL bei Discord an: <code>${esc(url)}/api/auth/discord/callback</code></p>`,
+        foot: `<button class="btn" data-close>Schließen</button>` });
+    }
+  };
 }
 
 // ------------------------------------------------------------------ Aufgaben, Protokoll

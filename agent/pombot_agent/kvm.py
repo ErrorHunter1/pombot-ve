@@ -70,9 +70,33 @@ def cpu_xml() -> str:
 
 
 def use_serial() -> bool:
-    if KVM_SERIAL in ("0", "1"):
-        return KVM_SERIAL == "1"
-    return not nested()
+    return KVM_SERIAL != "0"
+
+
+def ensure_serial_consoles() -> list[str]:
+    """Ergänzt die serielle Konsole bei VMs, denen sie fehlt (z. B. von Hand entfernt). Ohne sie booten
+    Cloud-Images nicht. Wirkt ab dem nächsten Stoppen/Starten der VM."""
+    if not use_serial():
+        return []
+    fixed = []
+    for name in list_guests():
+        try:
+            root = _xml(name, inactive=True)
+            devices = root.find("devices")
+            if devices.find("serial") is not None:
+                continue
+            serial = ET.SubElement(devices, "serial", {"type": "pty"})
+            ET.SubElement(serial, "target", {"port": "0"})
+            console = ET.SubElement(devices, "console", {"type": "pty"})
+            ET.SubElement(console, "target", {"type": "serial", "port": "0"})
+            path = _guest_dir(name) / "domain.xml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(ET.tostring(root, encoding="unicode"))
+            run(["virsh", "define", path])
+            fixed.append(name)
+        except (CmdError, ET.ParseError, OSError):
+            continue
+    return fixed
 
 
 def domain_xml(spec: dict, disk: Path, cdrom: Path | None, kvm: bool) -> str:
