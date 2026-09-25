@@ -174,7 +174,7 @@ UP="$(api POST "/api/nodes/$(api GET /api/nodes | json 'd[0]["id"]')/isos/upload
 NID="$(api GET /api/nodes | json 'd[0]["id"]')"
 OFF=0; CHUNK=$((16 * 1024 * 1024))
 while [ "$OFF" -lt "$SIZE" ]; do
-  OFF="$(tail -c +$((OFF + 1)) /tmp/ci-test.iso | head -c "$CHUNK" | curl -sk -b "$JAR" -X PUT -H "X-PomBot: 1" -H "Content-Type: application/octet-stream" \
+  OFF="$(dd if=/tmp/ci-test.iso bs=1M iflag=skip_bytes,count_bytes skip="$OFF" count="$CHUNK" status=none | curl -sk -b "$JAR" -X PUT -H "X-PomBot: 1" -H "Content-Type: application/octet-stream" \
         --data-binary @- "$API/api/nodes/$NID/isos/uploads/$UP?offset=$OFF" | json 'd["offset"]')"
   echo "hochgeladen: $OFF / $SIZE"
 done
