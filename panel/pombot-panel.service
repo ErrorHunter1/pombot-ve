@@ -1,0 +1,20 @@
+[Unit]
+Description=PomBot Panel (Web-Oberfläche)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pombot
+Group=pombot
+EnvironmentFile=/etc/pombot/panel.env
+WorkingDirectory=/opt/pombot/panel
+ExecStart=/opt/pombot/panel/venv/bin/uvicorn pombot_panel.main:app --app-dir /opt/pombot/panel --host ${POMBOT_BIND} --port ${POMBOT_PORT} --ssl-keyfile /etc/pombot/panel-key.pem --ssl-certfile /etc/pombot/panel-cert.pem --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

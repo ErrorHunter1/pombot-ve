@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version prüfen
+        run: test "v$(tr -d '[:space:]' < VERSION)" = "${GITHUB_REF_NAME}"
+      - name: Pakete bauen
+        run: bash packaging/build-deb.sh
+      - name: Release erstellen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.deb --title "PomBot VE $GITHUB_REF_NAME" --notes "$(cat <<'NOTES'
+          ## Installation
+
+          **Panel** (Web-Oberfläche):
+          ```bash
+          sudo apt install ./pombot-panel_*_all.deb
+          ```
+          Die Zugangsdaten des ersten Admins stehen danach in `/root/pombot-admin.txt`.
+
+          **Node** (Virtualisierungs-Host, auch auf demselben Server möglich):
+          ```bash
+          sudo apt install ./pombot-agent_*_all.deb
+          ```
+          Den ausgegebenen `POMBOT_JOIN=…`-Code im Panel unter *Nodes → Node hinzufügen → Join-Code* einfügen,
+          oder den Node direkt im Panel per SSH hinzufügen (dann ist das Agent-Paket nicht nötig).
+
+          Unterstützt: Debian 12/13, Ubuntu 22.04/24.04. Bei der Installation werden Python-Pakete aus dem Internet geladen.
+          NOTES
+          )"

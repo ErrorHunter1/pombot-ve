@@ -1,0 +1,16 @@
+[Unit]
+Description=PomBot Agent (Virtualisierungs-Host)
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/pombot/agent.env
+WorkingDirectory=/opt/pombot/agent
+ExecStart=/opt/pombot/agent/venv/bin/uvicorn pombot_agent.main:app --app-dir /opt/pombot/agent --host ${POMBOT_AGENT_BIND} --port ${POMBOT_AGENT_PORT} --ssl-keyfile /etc/pombot/agent-key.pem --ssl-certfile /etc/pombot/agent-cert.pem --no-access-log
+Restart=always
+RestartSec=3
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

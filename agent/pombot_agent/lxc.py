@@ -1,0 +1,434 @@
+"""LXC-Container verwalten (lxc-* Werkzeuge)."""
+import json
+import re
+import shlex
+import shutil
+import tempfile
+import time
+from pathlib import Path
+
+from . import netcfg
+from .config import BACKUP_DIR, GUEST_DIR, LXC_BACKEND, LXC_KEYSERVER, LXC_PATH, LXC_UNPRIVILEGED
+from .util import CmdError, check_name, check_snap, run
+
+_cpu_prev: dict[str, tuple[float, int]] = {}
+ATTACH = ["--clear-env", "--set-var", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "--set-var", "DEBIAN_FRONTEND=noninteractive"]
+
+
+def _dir(name: str) -> Path:
+    return LXC_PATH / check_name(name)
+
+
+def exists(name: str) -> bool:
+    return (_dir(name) / "config").exists()
+
+
+def list_guests() -> dict:
+    result = {}
+    out = run(["lxc-ls", "-f", "-F", "NAME,STATE"])
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and re.match(r"^pv\d+$", parts[0]):
+            result[parts[0]] = {"type": "lxc", "state": _state(parts[1])}
+    return result
+
+
+def _state(raw: str) -> str:
+    return {"RUNNING": "running", "STOPPED": "stopped", "FROZEN": "paused",
+            "STARTING": "starting", "STOPPING": "stopping"}.get(raw.strip().upper(), "unknown")
+
+
+def state(name: str) -> str:
+    out = run(["lxc-info", "-n", name, "-s", "-H"])
+    return _state(out.strip())
+
+
+# ---------------------------------------------------------------- Konfiguration
+
+def _read_config(name: str) -> list[str]:
+    return (_dir(name) / "config").read_text().splitlines()
+
+
+def get_config(name: str, key: str) -> str | None:
+    for line in _read_config(name):
+        if "=" in line and line.split("=", 1)[0].strip() == key:
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def set_config(name: str, key: str, value: str | None) -> None:
+    lines = [ln for ln in _read_config(name) if not ("=" in ln and ln.split("=", 1)[0].strip() == key)]
+    if value is not None:
+        lines.append(f"{key} = {value}")
+    (_dir(name) / "config").write_text("\n".join(lines) + "\n")
+
+
+def _rootfs(name: str) -> tuple[str, Path]:
+    raw = get_config(name, "lxc.rootfs.path") or ""
+    if raw.startswith("loop:"):
+        return "loop", Path(raw[5:])
+    if raw.startswith("dir:"):
+        raw = raw[4:]
+    return "dir", Path(raw or _dir(name) / "rootfs")
+
+
+def _limits(cores: int, memory_mb: int) -> dict:
+    return {"lxc.cgroup2.cpu.max": f"{int(cores) * 100000} 100000",
+            "lxc.cgroup2.memory.max": f"{int(memory_mb)}M",
+            "lxc.cgroup2.memory.swap.max": f"{int(memory_mb)}M"}
+
+
+def attach(name: str, command: str, job=None, input_text=None, timeout=900, log=True) -> str:
+    return run(["lxc-attach", "-n", name, *ATTACH, "--", "/bin/sh", "-c", command],
+               job=job, input_text=input_text, timeout=timeout, log=log)
+
+
+def _wait_running(name: str, timeout: int = 60) -> None:
+    run(["lxc-wait", "-n", name, "-s", "RUNNING", "-t", str(timeout)], timeout=timeout + 10)
+
+
+def _start(name: str, job=None) -> None:
+    # Eigene systemd-Unit mit Delegate=yes, damit der Container eine saubere cgroup bekommt
+    # und nicht beim Neustart des Agents mit beendet wird.
+    unit = f"pombot-lxc-{name}"
+    run(["systemctl", "reset-failed", unit], check=False)
+    run(["systemd-run", f"--unit={unit}", "--collect", "--property=Delegate=yes",
+         "--property=KillMode=mixed", "--property=TimeoutStopSec=90",
+         "lxc-start", "-F", "-n", name], job=job, timeout=60)
+    _wait_running(name)
+
+
+def _stop(name: str, job=None, timeout: int = 60) -> None:
+    if state(name) != "stopped":
+        run(["lxc-stop", "-n", name, "-t", str(timeout)], job=job, check=False, timeout=timeout + 30)
+        if state(name) != "stopped":
+            run(["lxc-stop", "-n", name, "-k"], job=job, check=False)
+
+
+# ---------------------------------------------------------------- Anlegen
+
+def _network_script(spec: dict) -> str:
+    ips, dns = spec.get("ips") or [], spec.get("dns") or []
+    hostname = spec.get("hostname") or spec["name"]
+    short = hostname.split(".")[0]
+    netplan = json.dumps({"network": {"version": 2, "ethernets": {"eth0": netcfg.v2_ethernet(ips, dns)}}},
+                         indent=2)
+    networkd = netcfg.networkd_unit(ips, dns)
+    ifupdown = netcfg.ifupdown(ips, dns)
+    resolv = "".join(f"nameserver {s}\n" for s in dns)
+    q = shlex.quote
+    return f"""set -e
+echo {q(short)} > /etc/hostname
+hostname {q(short)} 2>/dev/null || true
+sed -i '/^127\\.0\\.1\\.1/d' /etc/hosts
+echo {q(f"127.0.1.1 {hostname} {short}")} >> /etc/hosts
+if [ -d /etc/netplan ]; then
+  rm -f /etc/netplan/*.yaml
+  printf '%s\\n' {q(netplan)} > /etc/netplan/50-pombot.yaml
+  chmod 600 /etc/netplan/50-pombot.yaml
+  netplan apply || true
+elif [ -d /etc/systemd/network ] && systemctl is-enabled systemd-networkd >/dev/null 2>&1; then
+  rm -f /etc/systemd/network/eth0.network
+  printf '%s' {q(networkd)} > /etc/systemd/network/10-pombot-eth0.network
+  systemctl restart systemd-networkd || true
+else
+  printf '%s' {q(ifupdown)} > /etc/network/interfaces
+  (ifdown eth0 || true; ifup eth0 || true) 2>/dev/null
+fi
+if [ -n {q(resolv)} ] && [ ! -L /etc/resolv.conf ]; then printf '%s' {q(resolv)} > /etc/resolv.conf; fi
+"""
+
+
+def _ssh_script(spec: dict) -> str:
+    keys = "\n".join(k.strip() for k in (spec.get("ssh_keys") or []) if k.strip())
+    permit = "yes" if spec.get("password") else "prohibit-password"
+    q = shlex.quote
+    return f"""set -e
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if command -v apt-get >/dev/null; then
+    apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null && break
+  elif command -v apk >/dev/null; then
+    apk add --no-cache openssh >/dev/null && break
+  elif command -v dnf >/dev/null; then
+    dnf install -y -q openssh-server >/dev/null && break
+  fi
+  echo "Paketinstallation fehlgeschlagen, neuer Versuch in 5s …"; sleep 5
+done
+mkdir -p /etc/ssh/sshd_config.d /root/.ssh
+chmod 700 /root/.ssh
+printf 'PermitRootLogin {permit}\\nPasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/01-pombot.conf
+if [ -n {q(keys)} ]; then printf '%s\\n' {q(keys)} >> /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; fi
+(systemctl enable ssh 2>/dev/null; systemctl restart ssh 2>/dev/null) || (rc-update add sshd 2>/dev/null; rc-service sshd restart 2>/dev/null) || true
+"""
+
+
+def create(job, spec: dict) -> dict:
+    name = check_name(spec["name"])
+    if exists(name):
+        raise CmdError(f"Container {name} existiert bereits")
+    arch = run(["dpkg", "--print-architecture"]).strip() or "amd64"
+    base_conf = [
+        "lxc.net.0.type = veth",
+        f"lxc.net.0.link = {spec['bridge']}",
+        "lxc.net.0.flags = up",
+        f"lxc.net.0.hwaddr = {spec['mac']}",
+        "lxc.net.0.name = eth0",
+    ]
+    if LXC_UNPRIVILEGED:
+        base_conf += ["lxc.idmap = u 0 100000 65536", "lxc.idmap = g 0 100000 65536"]
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
+        fh.write("\n".join(base_conf) + "\n")
+        conf_path = fh.name
+    cmd = ["lxc-create", "-n", name, "-f", conf_path, "-t", "download"]
+    if LXC_BACKEND == "loop":
+        cmd += ["-B", "loop", "--fssize", f"{int(spec['disk_gb'])}G"]
+    cmd += ["--", "-d", spec["lxc_dist"], "-r", spec["lxc_release"], "-a", arch]
+    try:
+        job.write(f"Lade Container-Image {spec['lxc_dist']} {spec['lxc_release']} ({arch}) …")
+        run(cmd, job=job, timeout=3600, env={"DOWNLOAD_KEYSERVER": LXC_KEYSERVER})
+        for key, value in _limits(spec["cores"], spec["memory_mb"]).items():
+            set_config(name, key, value)
+        set_config(name, "lxc.start.auto", "1")
+        set_config(name, "lxc.uts.name", (spec.get("hostname") or name).split(".")[0])
+        job.write("Starte Container …")
+        _start(name, job)
+        time.sleep(3)
+        job.write("Konfiguriere Netzwerk (IP, Gateway, DNS) …")
+        attach(name, _network_script(spec), job=job, log=False)
+        if spec.get("password"):
+            job.write("Setze root-Passwort …")
+            run(["lxc-attach", "-n", name, *ATTACH, "--", "chpasswd"],
+                input_text=f"root:{spec['password']}\n", log=False)
+        job.write("Installiere und konfiguriere SSH …")
+        attach(name, _ssh_script(spec), job=job, log=False, timeout=1200)
+    except Exception:
+        job.write("Räume nach Fehler auf …")
+        run(["lxc-destroy", "-n", name, "-f"], check=False)
+        raise
+    finally:
+        Path(conf_path).unlink(missing_ok=True)
+    return {"state": state(name)}
+
+
+def delete(job, name: str) -> dict:
+    job.write(f"Lösche Container {name} …")
+    if exists(name):
+        run(["lxc-stop", "-n", name, "-k"], check=False)
+        run(["lxc-destroy", "-n", name, "-f"], job=job)
+    shutil.rmtree(GUEST_DIR / name, ignore_errors=True)
+    return {}
+
+
+def action(name: str, act: str) -> str:
+    if act == "start":
+        _start(name)
+    elif act == "stop":
+        run(["lxc-stop", "-n", name, "-k"], timeout=60)
+    elif act == "shutdown":
+        run(["lxc-stop", "-n", name, "-t", "60"], timeout=90)
+    elif act == "reboot":
+        run(["lxc-stop", "-n", name, "-r", "-t", "60"], timeout=90)
+    elif act == "suspend":
+        run(["lxc-freeze", "-n", name])
+    elif act == "resume":
+        run(["lxc-unfreeze", "-n", name])
+    else:
+        raise CmdError("Unbekannte Aktion")
+    return state(name)
+
+
+def config(name: str) -> dict:
+    cpu = (get_config(name, "lxc.cgroup2.cpu.max") or "").split()
+    cores = int(cpu[0]) // int(cpu[1]) if len(cpu) == 2 and cpu[0].isdigit() else 0
+    mem = get_config(name, "lxc.cgroup2.memory.max") or ""
+    memory_mb = int(mem[:-1]) if mem.endswith("M") and mem[:-1].isdigit() else 0
+    return {"cores": cores, "memory_mb": memory_mb}
+
+
+def status(name: str) -> dict:
+    st = state(name)
+    cfg = config(name)
+    result = {"type": "lxc", "state": st, **cfg, "cpu": 0.0, "memory_used": None,
+              "disk_used": None, "disk_total": None, "net_rx": 0, "net_tx": 0}
+    if st not in ("running", "paused"):
+        return result
+    kv = {}
+    for line in run(["lxc-info", "-n", name, "-H"]).splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            kv[k.strip()] = v.strip()
+    now = time.time()
+    cpu_ns = int(kv.get("CPU use", "0") or 0)
+    prev = _cpu_prev.get(name)
+    _cpu_prev[name] = (now, cpu_ns)
+    if prev and now > prev[0] and cfg["cores"]:
+        result["cpu"] = round(max(0.0, (cpu_ns - prev[1]) / ((now - prev[0]) * 1e9 * cfg["cores"]) * 100), 1)
+    if kv.get("Memory use", "").isdigit():
+        result["memory_used"] = int(kv["Memory use"])
+    if kv.get("RX bytes", "").isdigit():
+        result["net_rx"] = int(kv["RX bytes"])
+        result["net_tx"] = int(kv.get("TX bytes", "0"))
+    try:
+        parts = attach(name, "df -B1 -P / | tail -1", timeout=10, log=False).split()
+        result["disk_total"], result["disk_used"] = int(parts[1]), int(parts[2])
+    except (CmdError, IndexError, ValueError):
+        pass
+    return result
+
+
+def resize(job, name: str, cores: int | None, memory_mb: int | None, disk_gb: int | None) -> dict:
+    cfg = config(name)
+    limits = _limits(cores or cfg["cores"] or 1, memory_mb or cfg["memory_mb"] or 512)
+    running = state(name) in ("running", "paused")
+    if cores or memory_mb:
+        for key, value in limits.items():
+            set_config(name, key, value)
+            if running:
+                run(["lxc-cgroup", "-n", name, key.split(".", 2)[2], value.replace('"', "")],
+                    job=job, check=False)
+        job.write("CPU/RAM-Limits sofort aktiv.")
+    if disk_gb:
+        kind, path = _rootfs(name)
+        if kind != "loop":
+            raise CmdError("Festplattengröße kann nur bei Loop-Containern geändert werden")
+        new_size = int(disk_gb) * (1 << 30)
+        if new_size < path.stat().st_size:
+            raise CmdError("Festplatten können nur vergrößert werden")
+        if new_size > path.stat().st_size:
+            if running:
+                job.write("Container wird für die Vergrößerung kurz gestoppt …")
+                _stop(name, job)
+            run(["truncate", "-s", str(new_size), path], job=job)
+            run(["e2fsck", "-fy", path], job=job, check=False)
+            run(["resize2fs", path], job=job)
+            if running:
+                _start(name, job)
+    return {}
+
+
+def set_password(name: str, user: str, password: str) -> None:
+    if state(name) != "running":
+        raise CmdError("Der Container muss laufen")
+    run(["lxc-attach", "-n", name, *ATTACH, "--", "chpasswd"], input_text=f"{user}:{password}\n", log=False)
+
+
+# ---------------------------------------------------------------- Snapshots (eigene Umsetzung)
+
+def _snap_dir(name: str, snap: str | None = None) -> Path:
+    base = GUEST_DIR / check_name(name) / "snapshots"
+    return base / check_snap(snap) if snap else base
+
+
+def snapshots(name: str) -> list[dict]:
+    base = _snap_dir(name)
+    result = []
+    if base.exists():
+        for d in sorted(base.iterdir()):
+            meta_file = d / "meta.json"
+            if meta_file.exists():
+                meta = json.loads(meta_file.read_text())
+                result.append({"name": d.name, "created": time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(meta["created"])), "state": "stopped",
+                               "description": meta.get("description", "")})
+    return result
+
+
+def _copy_rootfs(name: str, dest: Path, job, restore: bool = False) -> None:
+    kind, path = _rootfs(name)
+    if kind == "loop":
+        src, dst = (dest / "rootdev", path) if restore else (path, dest / "rootdev")
+        run(["cp", "--sparse=always", src, dst], job=job, timeout=6 * 3600)
+    elif restore:
+        shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True)
+        run(["tar", "--numeric-owner", "-xpf", dest / "rootfs.tar", "-C", path], job=job, timeout=6 * 3600)
+    else:
+        run(["tar", "--numeric-owner", "-cpf", dest / "rootfs.tar", "-C", path, "."], job=job, timeout=6 * 3600)
+
+
+def snapshot_create(job, name: str, snap: str, description: str = "") -> dict:
+    dest = _snap_dir(name, snap)
+    if dest.exists():
+        raise CmdError("Snapshot existiert bereits")
+    was_running = state(name) in ("running", "paused")
+    if was_running:
+        job.write("Container wird für den Snapshot kurz gestoppt …")
+        _stop(name, job)
+    try:
+        dest.mkdir(parents=True)
+        _copy_rootfs(name, dest, job)
+        shutil.copy2(_dir(name) / "config", dest / "config")
+        (dest / "meta.json").write_text(json.dumps({"created": time.time(), "description": description}))
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    finally:
+        if was_running:
+            _start(name, job)
+    return {}
+
+
+def snapshot_delete(job, name: str, snap: str) -> dict:
+    dest = _snap_dir(name, snap)
+    if not dest.exists():
+        raise CmdError("Snapshot nicht gefunden")
+    shutil.rmtree(dest)
+    job.write(f"Snapshot {snap} gelöscht.")
+    return {}
+
+
+def snapshot_rollback(job, name: str, snap: str) -> dict:
+    dest = _snap_dir(name, snap)
+    if not dest.exists():
+        raise CmdError("Snapshot nicht gefunden")
+    was_running = state(name) in ("running", "paused")
+    _stop(name, job)
+    _copy_rootfs(name, dest, job, restore=True)
+    shutil.copy2(dest / "config", _dir(name) / "config")
+    if was_running:
+        _start(name, job)
+    return {"state": state(name)}
+
+
+# ---------------------------------------------------------------- Backups
+
+def backup(job, name: str, auto: bool = False) -> dict:
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    target = BACKUP_DIR / f"{name}-lxc-{ts}{'-auto' if auto else ''}.tar.gz"
+    was_running = state(name) in ("running", "paused")
+    if was_running:
+        job.write("Container wird für ein konsistentes Backup gestoppt (Stop-Modus) …")
+        _stop(name, job)
+    try:
+        run(["tar", "--numeric-owner", "-S", "-czpf", target, "-C", LXC_PATH, name], job=job, timeout=6 * 3600)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    finally:
+        if was_running:
+            _start(name, job)
+    return {"file": target.name, "size": target.stat().st_size}
+
+
+def restore(job, name: str, archive: Path) -> dict:
+    listing = run(["tar", "-tzf", archive], timeout=3600).splitlines()
+    if not listing or any(not (p == name or p.startswith(name + "/")) for p in listing):
+        raise CmdError("Backup passt nicht zu diesem Container")
+    old = None
+    if exists(name):
+        _stop(name, job)
+        old = LXC_PATH / f".{name}.restore-old"
+        shutil.rmtree(old, ignore_errors=True)
+        _dir(name).rename(old)
+    try:
+        run(["tar", "--numeric-owner", "-xzpf", archive, "-C", LXC_PATH], job=job, timeout=6 * 3600)
+    except Exception:
+        shutil.rmtree(_dir(name), ignore_errors=True)
+        if old:
+            old.rename(_dir(name))
+        raise
+    if old:
+        shutil.rmtree(old, ignore_errors=True)
+    _start(name, job)
+    return {"state": state(name)}

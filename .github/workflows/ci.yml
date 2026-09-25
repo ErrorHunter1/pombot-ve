@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python-Syntax
+        run: python3 -m py_compile agent/pombot_agent/*.py panel/pombot_panel/*.py panel/pombot_panel/routers/*.py
+      - name: Shell-Skripte
+        run: for f in install.sh agent/*.sh panel/setup-panel.sh packaging/*.sh; do bash -n "$f"; done
+      - name: JavaScript
+        run: node --check panel/pombot_panel/static/app.js
+      - name: Pakete bauen
+        run: bash packaging/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-pakete
+          path: dist/*.deb
+
+  integration:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb-pakete
+          path: dist
+      - name: Integrationstest (echter LXC-Container, Firewall, Backup)
+        run: bash packaging/ci-integration.sh
+      - name: Logs bei Fehler
+        if: failure()
+        run: |
+          sudo journalctl -u pombot-panel -u pombot-agent --no-pager -n 200 || true
+          sudo nft list ruleset || true

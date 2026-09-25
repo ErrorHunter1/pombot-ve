@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Konsole – PomBot VE</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    :root { --bar: #181b20; --text: #e7e9ec; --muted: #858d99; --border: #2b3038; --good: #4cc26a; --bad: #f0645e; }
+    html, body { margin: 0; height: 100%; background: #0d1014; color: var(--text); font: 13px/1.4 system-ui, "Segoe UI", sans-serif; }
+    body { display: flex; flex-direction: column; }
+    .bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--bar); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .bar strong { font-size: 14px; }
+    .bar .spacer { flex: 1; }
+    .st { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+    .st::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .st.ok::before { background: var(--good); }
+    .st.err::before { background: var(--bad); }
+    button { height: 28px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--border); background: #1f2329; color: var(--text); font: inherit; cursor: pointer; }
+    button:hover { background: #262a31; }
+    #screen { flex: 1; min-height: 0; position: relative; }
+    #vnc { width: 100%; height: 100%; }
+    #term { position: absolute; inset: 8px; }
+    .msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 16px; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <strong id="title">Konsole</strong>
+    <span class="st" id="status">Verbinde …</span>
+    <span class="spacer"></span>
+    <button id="cad" hidden>Strg+Alt+Entf</button>
+    <button id="paste" hidden title="Text aus der Zwischenablage als Tastatureingabe senden">Text einfügen</button>
+    <button id="reconnect">Neu verbinden</button>
+    <button id="full">Vollbild</button>
+  </div>
+  <div id="screen"><div class="msg" id="msg">Verbinde …</div></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script type="module">
+    const params = new URLSearchParams(location.search);
+    const guestId = params.get("guest");
+    const nodeId = params.get("node");
+    const $ = (id) => document.getElementById(id);
+    const setStatus = (text, cls = "") => { $("status").textContent = text; $("status").className = "st " + cls; };
+    const wsBase = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+    let cleanup = () => {};
+
+    async function info() {
+      if (nodeId) {
+        const r = await fetch(`/api/nodes/${nodeId}`, { headers: { "X-PomBot": "1" } });
+        if (!r.ok) throw new Error("Keine Berechtigung");
+        const n = await r.json();
+        return { title: `Shell · ${n.name}`, kind: "term", url: `${wsBase}/api/nodes/${nodeId}/shell` };
+      }
+      const r = await fetch(`/api/guests/${guestId}`, { headers: { "X-PomBot": "1" } });
+      if (!r.ok) throw new Error("Server nicht gefunden oder keine Berechtigung");
+      const g = await r.json();
+      return { title: `${g.vmid} · ${g.name}`, kind: g.type === "kvm" ? "vnc" : "term", url: `${wsBase}/api/guests/${guestId}/console` };
+    }
+
+    async function startVNC(url) {
+      const mod = await import("https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/+esm");
+      let RFB = mod.default;
+      if (RFB && RFB.default) RFB = RFB.default;
+      $("screen").innerHTML = '<div id="vnc"></div>';
+      const rfb = new RFB($("vnc"), url, { wsProtocols: ["binary"] });
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+      rfb.background = "#0d1014";
+      rfb.addEventListener("connect", () => setStatus("Verbunden", "ok"));
+      rfb.addEventListener("disconnect", (e) => setStatus(e.detail.clean ? "Getrennt" : "Verbindung verloren", "err"));
+      $("cad").hidden = false;
+      $("paste").hidden = false;
+      $("cad").onclick = () => rfb.sendCtrlAltDel();
+      $("paste").onclick = async () => {
+        let text = "";
+        try { text = await navigator.clipboard.readText(); } catch (e) { text = prompt("Text zum Senden:") || ""; }
+        for (const ch of text) {
+          const code = ch === "\n" ? 0xff0d : ch.codePointAt(0);
+          rfb.sendKey(code < 256 || code === 0xff0d ? code : 0x01000000 + code);
+        }
+      };
+      rfb.focus();
+      cleanup = () => { try { rfb.disconnect(); } catch (e) {} };
+    }
+
+    function startTerm(url) {
+      $("screen").innerHTML = '<div id="term"></div>';
+      const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace',
+        theme: { background: "#0d1014" }, scrollback: 5000 });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open($("term"));
+      fit.fit();
+      const ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      const sendSize = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows })); };
+      ws.onopen = () => { setStatus("Verbunden", "ok"); sendSize(); term.focus(); };
+      ws.onclose = () => { setStatus("Getrennt", "err"); term.write("\r\n\x1b[90m[Verbindung beendet]\x1b[0m\r\n"); };
+      ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+      term.onData((d) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "input", data: d })); });
+      const onResize = () => { fit.fit(); sendSize(); };
+      window.addEventListener("resize", onResize);
+      cleanup = () => { window.removeEventListener("resize", onResize); ws.close(); term.dispose(); };
+    }
+
+    async function connect() {
+      cleanup();
+      setStatus("Verbinde …");
+      try {
+        const i = await info();
+        document.title = `${i.title} – Konsole`;
+        $("title").textContent = i.title;
+        if (i.kind === "vnc") await startVNC(i.url); else startTerm(i.url);
+      } catch (e) {
+        setStatus("Fehler", "err");
+        $("screen").innerHTML = `<div class="msg"></div>`;
+        $("screen").firstChild.textContent = e.message;
+      }
+    }
+
+    $("reconnect").onclick = connect;
+    $("full").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+    connect();
+  </script>
+</body>
+</html>

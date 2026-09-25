@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Verwaltungsbefehle: pombot-panel create-admin | reset-password <name> | add-node --join <code> | list-users
+# Die Konfiguration (/etc/pombot/panel.env) liest das Panel selbst ein.
+cd /opt/pombot/panel || exit 1
+exec runuser -u pombot -- /opt/pombot/panel/venv/bin/python -m pombot_panel.cli "$@"

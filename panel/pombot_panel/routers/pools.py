@@ -1,0 +1,156 @@
+"""IP-Pools und einzelne Adressen verwalten."""
+import ipaddress
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .. import ipam
+from ..db import get_db
+from ..models import IPAddress, IPPool, Node, User
+from ..security import audit, client_ip, current_user, require_admin
+
+router = APIRouter(prefix="/api/pools", tags=["pools"])
+
+
+def pool_dict(db: Session, p: IPPool) -> dict:
+    return {
+        "id": p.id, "name": p.name, "network": p.network, "gateway": p.gateway, "dns": p.dns,
+        "bridge": p.bridge, "range_start": p.range_start, "range_end": p.range_end,
+        "node_id": p.node_id, "node": p.node.name if p.node else None, "admin_only": p.admin_only,
+        "version": ipam.version_of(p), "size": ipam.pool_size(p), "used": ipam.pool_used(db, p),
+    }
+
+
+class PoolBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    network: str
+    gateway: str | None = None
+    dns: str = ""
+    bridge: str = Field(default="vmbr0", pattern=r"^[A-Za-z0-9_.-]{1,15}$")
+    range_start: str | None = None
+    range_end: str | None = None
+    node_id: int | None = None
+    admin_only: bool = False
+
+
+def _clean(body: PoolBody, db: Session) -> dict:
+    data = body.model_dump()
+    for key in ("gateway", "range_start", "range_end"):
+        data[key] = (data[key] or "").strip() or None
+    net = ipam.validate_pool(data["network"], data["gateway"], data["range_start"], data["range_end"])
+    data["network"] = str(net)
+    for server in [s.strip() for s in data["dns"].replace(";", ",").split(",") if s.strip()]:
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            raise HTTPException(400, f"Ungültiger DNS-Server: {server}")
+    if data["node_id"] and not db.get(Node, data["node_id"]):
+        raise HTTPException(400, "Node nicht gefunden")
+    return data
+
+
+@router.get("")
+def list_pools(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    pools = db.scalars(select(IPPool).order_by(IPPool.name))
+    return [pool_dict(db, p) for p in pools if user.is_admin or not p.admin_only]
+
+
+@router.post("")
+def create_pool(body: PoolBody, request: Request, user: User = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    if db.scalar(select(IPPool).where(IPPool.name == body.name)):
+        raise HTTPException(400, "Name bereits vergeben")
+    pool = IPPool(**_clean(body, db))
+    db.add(pool)
+    audit(db, user, "pool-create", f"{pool.name} {pool.network}", client_ip(request))
+    db.commit()
+    return pool_dict(db, pool)
+
+
+@router.put("/{pool_id}")
+def update_pool(pool_id: int, body: PoolBody, request: Request, user: User = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    pool = db.get(IPPool, pool_id)
+    if not pool:
+        raise HTTPException(404, "Pool nicht gefunden")
+    data = _clean(body, db)
+    if data["network"] != pool.network and pool.addresses:
+        raise HTTPException(400, "Das Netz kann nicht geändert werden, solange Adressen vergeben sind")
+    for key, value in data.items():
+        setattr(pool, key, value)
+    audit(db, user, "pool-update", pool.name, client_ip(request))
+    db.commit()
+    return pool_dict(db, pool)
+
+
+@router.delete("/{pool_id}")
+def delete_pool(pool_id: int, request: Request, user: User = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    pool = db.get(IPPool, pool_id)
+    if not pool:
+        raise HTTPException(404, "Pool nicht gefunden")
+    if any(a.guest_id for a in pool.addresses):
+        raise HTTPException(400, "Es sind noch Adressen an Server vergeben")
+    audit(db, user, "pool-delete", pool.name, client_ip(request))
+    db.delete(pool)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/{pool_id}/addresses")
+def pool_addresses(pool_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    pool = db.get(IPPool, pool_id)
+    if not pool:
+        raise HTTPException(404, "Pool nicht gefunden")
+    rows = sorted(pool.addresses, key=lambda a: ipaddress.ip_address(a.address))
+    return {
+        "pool": pool_dict(db, pool),
+        "next_free": ipam.free_address(db, pool),
+        "addresses": [{
+            "id": a.id, "address": a.address, "reserved": a.reserved, "note": a.note,
+            "guest_id": a.guest_id, "guest": f"{a.guest.name} (#{a.guest.vmid})" if a.guest else None,
+            "owner": a.guest.owner.username if a.guest else None,
+        } for a in rows],
+    }
+
+
+class ReserveBody(BaseModel):
+    address: str
+    note: str = Field(default="", max_length=255)
+
+
+@router.post("/{pool_id}/reserve")
+def reserve_address(pool_id: int, body: ReserveBody, request: Request, user: User = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    pool = db.get(IPPool, pool_id)
+    if not pool:
+        raise HTTPException(404, "Pool nicht gefunden")
+    try:
+        addr = ipaddress.ip_address(body.address.strip())
+    except ValueError:
+        raise HTTPException(400, "Ungültige IP-Adresse")
+    if addr not in ipaddress.ip_network(pool.network):
+        raise HTTPException(400, "Adresse liegt nicht im Netz des Pools")
+    with ipam.alloc_lock:
+        if db.scalar(select(IPAddress).where(IPAddress.pool_id == pool.id, IPAddress.address == str(addr))):
+            raise HTTPException(400, "Adresse ist bereits vergeben oder reserviert")
+        db.add(IPAddress(pool_id=pool.id, address=str(addr), reserved=True, note=body.note))
+        audit(db, user, "ip-reserve", f"{pool.name} {addr}", client_ip(request))
+        db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{pool_id}/addresses/{address_id}")
+def release_address(pool_id: int, address_id: int, request: Request, user: User = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    addr = db.get(IPAddress, address_id)
+    if not addr or addr.pool_id != pool_id:
+        raise HTTPException(404, "Adresse nicht gefunden")
+    if addr.guest_id:
+        raise HTTPException(400, "Adresse ist einem Server zugewiesen – Server zuerst löschen")
+    audit(db, user, "ip-release", addr.address, client_ip(request))
+    db.delete(addr)
+    db.commit()
+    return {"ok": True}
