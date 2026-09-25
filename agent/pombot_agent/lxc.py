@@ -149,7 +149,10 @@ else
   printf '%s' {q(ifupdown)} > /etc/network/interfaces
   (ifdown eth0 || true; ifup eth0 || true) 2>/dev/null
 fi
-if [ -n {q(resolv)} ] && [ ! -L /etc/resolv.conf ]; then printf '%s' {q(resolv)} > /etc/resolv.conf; fi
+# DNS: eigene resolv.conf, außer systemd-resolved läuft tatsächlich (dann kommt DNS aus netplan/networkd)
+if [ -n {q(resolv)} ] && {{ [ ! -L /etc/resolv.conf ] || ! systemctl is-active -q systemd-resolved 2>/dev/null; }}; then
+  rm -f /etc/resolv.conf; printf '%s' {q(resolv)} > /etc/resolv.conf
+fi
 """
 
 
@@ -158,22 +161,33 @@ def _ssh_script(spec: dict) -> str:
     permit = "yes" if spec.get("password") else "prohibit-password"
     q = shlex.quote
     return f"""set -e
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in 1 2 3 4 5 6; do
   if command -v apt-get >/dev/null; then
-    apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null && break
+    apt-get update -qq 2>&1 | tail -n 3 && apt-get install -y -qq openssh-server >/dev/null 2>/tmp/pombot-apt.err \
+      && break
+    tail -n 3 /tmp/pombot-apt.err 2>/dev/null || true
   elif command -v apk >/dev/null; then
     apk add --no-cache openssh >/dev/null && break
   elif command -v dnf >/dev/null; then
     dnf install -y -q openssh-server >/dev/null && break
   fi
-  echo "Paketinstallation fehlgeschlagen, neuer Versuch in 5s …"; sleep 5
+  echo "Paketinstallation fehlgeschlagen (Versuch $i/6), neuer Versuch in 5s …"; sleep 5
 done
+if ! command -v sshd >/dev/null && [ ! -x /usr/sbin/sshd ]; then
+  echo "WARNUNG: openssh-server konnte nicht installiert werden – hat der Container Internet?"
+  echo "Netzwerk-Diagnose:"; ip -4 addr show eth0 2>&1 | grep inet; ip route 2>&1; cat /etc/resolv.conf 2>&1
+fi
 mkdir -p /etc/ssh/sshd_config.d /root/.ssh
 chmod 700 /root/.ssh
 printf 'PermitRootLogin {permit}\\nPasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/01-pombot.conf
 if [ -n {q(keys)} ]; then printf '%s\\n' {q(keys)} >> /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; fi
 (systemctl enable ssh 2>/dev/null; systemctl restart ssh 2>/dev/null) || (rc-update add sshd 2>/dev/null; rc-service sshd restart 2>/dev/null) || true
 """
+
+
+def _log_output(job, output: str) -> None:
+    for line in output.strip().splitlines()[-25:]:
+        job.write(f"  {line}")
 
 
 def create(job, spec: dict) -> dict:
@@ -209,13 +223,13 @@ def create(job, spec: dict) -> dict:
         _start(name, job)
         time.sleep(3)
         job.write("Konfiguriere Netzwerk (IP, Gateway, DNS) …")
-        attach(name, _network_script(spec), job=job, log=False)
+        _log_output(job, attach(name, _network_script(spec), job=job, log=False))
         if spec.get("password"):
             job.write("Setze root-Passwort …")
             run(["lxc-attach", "-n", name, *ATTACH, "--", "chpasswd"],
                 input_text=f"root:{spec['password']}\n", log=False)
         job.write("Installiere und konfiguriere SSH …")
-        attach(name, _ssh_script(spec), job=job, log=False, timeout=1200)
+        _log_output(job, attach(name, _ssh_script(spec), job=job, log=False, timeout=1200))
     except Exception:
         job.write("Räume nach Fehler auf …")
         run(["lxc-destroy", "-n", name, "-f"], check=False)

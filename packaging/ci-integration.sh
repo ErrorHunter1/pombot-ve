@@ -81,7 +81,12 @@ if ! sudo lxc-attach -n pv100 -- ip -4 addr show eth0 | grep -q "$IP"; then
 fi
 sudo lxc-attach -n pv100 -- hostname | grep -q ci-ct || fail "Hostname nicht gesetzt"
 ping -c 2 -W 2 "$IP" || fail "Container nicht per Ping erreichbar"
-sudo lxc-attach -n pv100 -- sh -c 'command -v sshd' || fail "SSH-Server nicht installiert"
+if ! sudo lxc-attach -n pv100 -- test -x /usr/sbin/sshd; then
+  echo "--- Diagnose Internet im Container"
+  sudo lxc-attach -n pv100 -- sh -c 'ip route; cat /etc/resolv.conf; ls -la /etc/resolv.conf; ping -c1 -W2 1.1.1.1; getent hosts deb.debian.org' || true
+  sudo iptables -S FORWARD; sudo iptables -t nat -S POSTROUTING; sysctl net.bridge.bridge-nf-call-iptables 2>/dev/null || true
+  fail "SSH-Server nicht installiert"
+fi
 api GET "/api/guests/$GID/status" | json 'd["state"], d["cpu"], d["memory_used"]'
 end
 
