@@ -26,7 +26,7 @@ def _int(name: str, default: int) -> int:
 
 
 class Settings:
-    version = "0.2.0"
+    version = "0.3.0"
     secret_key = os.environ.get("POMBOT_SECRET_KEY", "")
     db_url = os.environ.get("POMBOT_DB_URL", "sqlite:///./pombot-panel.db")
     base_url = os.environ.get("POMBOT_BASE_URL", "http://localhost:8443").rstrip("/")

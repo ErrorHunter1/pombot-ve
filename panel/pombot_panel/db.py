@@ -23,6 +23,36 @@ class Base(DeclarativeBase):
     pass
 
 
+def migrate() -> None:
+    """Legt fehlende Tabellen an und ergänzt neue Spalten in bestehenden Tabellen (einfache Migration
+    für Updates, ohne dass Daten verloren gehen)."""
+    from sqlalchemy import inspect, text
+
+    Base.metadata.create_all(engine)
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                col_type = column.type.compile(dialect=engine.dialect)
+                has_default = column.default is not None and not callable(column.default.arg)
+                default = column.default.arg if has_default else None
+                if isinstance(default, bool):
+                    literal = "1" if default else "0"
+                elif isinstance(default, (int, float)):
+                    literal = str(default)
+                elif isinstance(default, str):
+                    literal = "'" + default.replace("'", "''") + "'"
+                else:
+                    literal = None
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}'
+                if literal is not None:
+                    ddl += f" NOT NULL DEFAULT {literal}" if not column.nullable else f" DEFAULT {literal}"
+                conn.execute(text(ddl))
+
+
 def get_db():
     db = SessionLocal()
     try:

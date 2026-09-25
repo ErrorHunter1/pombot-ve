@@ -11,7 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import scheduler, tasks
 from .config import settings
-from .db import Base, SessionLocal, engine
+from .db import SessionLocal, migrate
 from .routers import auth, extras, guests, nodes, pools, system, users
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -21,7 +21,7 @@ STATIC = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(engine)
+    migrate()
     with SessionLocal() as db:
         system.seed_templates(db)
     tasks.LOOP = asyncio.get_running_loop()

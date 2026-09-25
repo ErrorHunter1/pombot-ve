@@ -1,0 +1,15 @@
+[Unit]
+Description=PomBot VE: geroutetes Netz (pbr0) für Zusatz-IPs wiederherstellen
+After=network-online.target
+Wants=network-online.target
+Before=libvirtd.service lxc.service pombot-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/pombot/agent/venv/bin/python -m pombot_agent.routed
+WorkingDirectory=/opt/pombot/agent
+Environment=POMBOT_AGENT_ENV=/etc/pombot/agent.env
+
+[Install]
+WantedBy=multi-user.target

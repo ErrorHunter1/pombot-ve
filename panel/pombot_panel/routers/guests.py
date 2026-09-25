@@ -33,10 +33,15 @@ def guest_dict(g: Guest) -> dict:
         "cores": g.cores, "memory_mb": g.memory_mb, "disk_gb": g.disk_gb, "mac": g.mac,
         "status": g.status, "power": g.power, "error": g.error, "notes": g.notes,
         "created_at": g.created_at.isoformat() + "Z",
-        "ips": [{"address": ip.address, "pool": ip.pool.name, "gateway": ip.pool.gateway,
-                 "prefix": ipam.prefix_of(ip.pool),
-                 "version": ipam.version_of(ip.pool)} for ip in g.ips],
+        "ips": [_ip_view(ip, g) for ip in g.ips],
     }
+
+
+def _ip_view(ip, g: Guest) -> dict:
+    routed = ipam.is_routed(ip.pool)
+    gateway = (g.node.info.get("main_ipv4") if g.node else None) if routed else ip.pool.gateway
+    return {"address": ip.address, "pool": ip.pool.name, "gateway": gateway, "prefix": ipam.prefix_of(ip.pool),
+            "version": ipam.version_of(ip.pool), "routed": routed}
 
 
 def _agent(g: Guest) -> AgentClient:

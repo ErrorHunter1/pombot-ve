@@ -17,6 +17,7 @@ router = APIRouter(prefix="/api/pools", tags=["pools"])
 def pool_dict(db: Session, p: IPPool) -> dict:
     return {
         "id": p.id, "name": p.name, "network": p.network, "gateway": p.gateway, "dns": p.dns,
+        "mode": p.mode, "address_list": p.address_list, "list_count": len(ipam.pool_list(p)),
         "bridge": p.bridge, "range_start": p.range_start, "range_end": p.range_end,
         "node_id": p.node_id, "node": p.node.name if p.node else None, "admin_only": p.admin_only,
         "version": ipam.version_of(p), "size": ipam.pool_size(p), "used": ipam.pool_used(db, p),
@@ -25,7 +26,9 @@ def pool_dict(db: Session, p: IPPool) -> dict:
 
 class PoolBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
-    network: str
+    mode: str = Field(default="bridged", pattern="^(bridged|routed)$")
+    network: str = ""
+    address_list: str = Field(default="", max_length=100_000)
     gateway: str | None = None
     dns: str = ""
     bridge: str = Field(default="vmbr0", pattern=r"^[A-Za-z0-9_.-]{1,15}$")
@@ -39,8 +42,17 @@ def _clean(body: PoolBody, db: Session) -> dict:
     data = body.model_dump()
     for key in ("gateway", "range_start", "range_end"):
         data[key] = (data[key] or "").strip() or None
-    net = ipam.validate_pool(data["network"], data["gateway"], data["range_start"], data["range_end"])
-    data["network"] = str(net)
+    data["network"] = ipam.validate_pool(data["mode"], data["network"], data["gateway"], data["range_start"],
+                                         data["range_end"], data["address_list"])
+    data["address_list"] = "\n".join(ipam.parse_list(data["address_list"]))
+    if data["mode"] == "routed":
+        # Gateway ist automatisch die Haupt-IP des Nodes; Gäste hängen an der internen Bridge pbr0
+        data["gateway"], data["bridge"] = None, ipam.ROUTED_BRIDGE
+        if not data["node_id"]:
+            nodes = db.scalars(select(Node.id)).all()
+            if len(nodes) != 1:
+                raise HTTPException(400, "Geroutete Zusatz-IPs gehören zu genau einem Server – bitte den Node wählen")
+            data["node_id"] = nodes[0]
     for server in [s.strip() for s in data["dns"].replace(";", ",").split(",") if s.strip()]:
         try:
             ipaddress.ip_address(server)
@@ -76,10 +88,14 @@ def update_pool(pool_id: int, body: PoolBody, request: Request, user: User = Dep
     if not pool:
         raise HTTPException(404, "Pool nicht gefunden")
     data = _clean(body, db)
-    if data["network"] != pool.network and pool.addresses:
-        raise HTTPException(400, "Das Netz kann nicht geändert werden, solange Adressen vergeben sind")
+    if pool.addresses and (data["mode"] != pool.mode or data["node_id"] != pool.node_id):
+        raise HTTPException(400, "Modus und Node können nicht geändert werden, solange Adressen vergeben sind")
     for key, value in data.items():
         setattr(pool, key, value)
+    missing = [a.address for a in pool.addresses if a.guest_id and not ipam.contains(pool, a.address)]
+    if missing:
+        db.rollback()
+        raise HTTPException(400, f"Diese vergebenen Adressen wären nicht mehr im Pool: {', '.join(missing)}")
     audit(db, user, "pool-update", pool.name, client_ip(request))
     db.commit()
     return pool_dict(db, pool)
@@ -131,8 +147,8 @@ def reserve_address(pool_id: int, body: ReserveBody, request: Request, user: Use
         addr = ipaddress.ip_address(body.address.strip())
     except ValueError:
         raise HTTPException(400, "Ungültige IP-Adresse")
-    if addr not in ipaddress.ip_network(pool.network):
-        raise HTTPException(400, "Adresse liegt nicht im Netz des Pools")
+    if not ipam.contains(pool, str(addr)):
+        raise HTTPException(400, "Adresse gehört nicht zu diesem Pool")
     with ipam.alloc_lock:
         if db.scalar(select(IPAddress).where(IPAddress.pool_id == pool.id, IPAddress.address == str(addr))):
             raise HTTPException(400, "Adresse ist bereits vergeben oder reserviert")

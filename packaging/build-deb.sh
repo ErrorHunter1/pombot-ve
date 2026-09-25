@@ -46,6 +46,8 @@ copy_clean "$ROOT/agent/pombot_agent" "$A/opt/pombot/agent/pombot_agent"
 cp "$ROOT/agent/requirements.txt" "$ROOT/agent/install-agent.sh" "$ROOT/agent/bridge-setup.sh" "$A/opt/pombot/agent/"
 cp "$ROOT/agent/pombot-agent.service" "$A/opt/pombot/agent/"
 cp "$ROOT/agent/pombot-agent.service" "$A/usr/lib/systemd/system/pombot-agent.service"
+cp "$ROOT/agent/pombot-network.service" "$A/opt/pombot/agent/"
+cp "$ROOT/agent/pombot-network.service" "$A/usr/lib/systemd/system/pombot-network.service"
 
 cat > "$A/DEBIAN/control" <<EOF
 Package: pombot-agent
@@ -83,7 +85,7 @@ cat > "$A/DEBIAN/prerm" <<'EOF'
 set -e
 if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
   systemctl stop pombot-agent >/dev/null 2>&1 || true
-  systemctl disable pombot-agent >/dev/null 2>&1 || true
+  systemctl disable pombot-agent pombot-network >/dev/null 2>&1 || true
 fi
 exit 0
 EOF

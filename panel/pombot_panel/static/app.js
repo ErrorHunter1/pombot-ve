@@ -973,7 +973,7 @@ async function viewCreate() {
   const nodeOptions = `<option value="auto">Automatisch (Node mit dem meisten freien RAM)</option>` + (admin ? onlineNodes.map((n) =>
     `<option value="${n.id}">${esc(n.name)} – ${fmtMB(Math.max(0, Math.round((n.info.memory_total || 0) / 1048576) - n.committed_memory_mb))} frei</option>`).join("") : "");
   const poolOpt = (v) => pools.filter((p) => p.version === v).map((p) =>
-    `<option value="${p.id}" ${p.size - p.used <= 0 ? "disabled" : ""}>${esc(p.name)} (${esc(p.network)}) – ${p.size - p.used} frei</option>`).join("");
+    `<option value="${p.id}" ${p.size - p.used <= 0 ? "disabled" : ""}>${esc(p.name)}${p.network ? ` (${esc(p.network)})` : ""} – ${p.size - p.used} frei</option>`).join("");
 
   const osCard = (t) => `<button type="button" class="os-card" data-tpl="${t.id}">
     <span class="os-icon ${esc(t.os_family)}">${{ debian: "D", ubuntu: "U", windows: "W" }[t.os_family] || "L"}</span>
@@ -1311,23 +1311,112 @@ async function viewNode(params, m, silent, seq) {
 // ------------------------------------------------------------------ IP-Pools
 
 function poolDialog(pool, nodes) {
-  const p = pool || { name: "", network: "", gateway: "", dns: "1.1.1.1, 8.8.8.8", bridge: "vmbr0", range_start: "", range_end: "", node_id: null, admin_only: false };
+  const p = pool || { name: "", mode: "routed", network: "", address_list: "", gateway: "", dns: "1.1.1.1, 8.8.8.8", bridge: "vmbr0",
+    range_start: "", range_end: "", node_id: nodes.length === 1 ? nodes[0].id : null, admin_only: false };
+  const st = { mode: p.mode || "bridged", source: p.address_list || !p.network ? "list" : "range" };
   formModal({
     title: pool ? `Pool ${pool.name} bearbeiten` : "IP-Pool anlegen",
-    fields: `
-      <div class="row"><label class="field"><span>Name</span><input type="text" name="name" value="${esc(p.name)}" required></label>
-        <label class="field"><span>Netz (CIDR)</span><input type="text" name="network" value="${esc(p.network)}" placeholder="203.0.113.0/24 oder 2001:db8::/64" required></label></div>
-      <div class="row"><label class="field"><span>Gateway</span><input type="text" name="gateway" value="${esc(p.gateway || "")}" placeholder="203.0.113.1"><div class="hint">Darf auch außerhalb des Netzes liegen (z. B. bei Hetzner/OVH) – wird dann on-link geroutet.</div></label>
-        <label class="field"><span>DNS-Server</span><input type="text" name="dns" value="${esc(p.dns)}" placeholder="1.1.1.1, 8.8.8.8"></label></div>
-      <div class="row"><label class="field"><span>Erste vergebene IP (optional)</span><input type="text" name="range_start" value="${esc(p.range_start || "")}"></label>
-        <label class="field"><span>Letzte vergebene IP (optional)</span><input type="text" name="range_end" value="${esc(p.range_end || "")}"></label></div>
-      <div class="row"><label class="field"><span>Bridge auf dem Node</span><input type="text" name="bridge" value="${esc(p.bridge)}" required></label>
-        <label class="field"><span>Nur für Node</span><select name="node_id"><option value="">Alle Nodes</option>${nodes.map((n) => `<option value="${n.id}" ${n.id === p.node_id ? "selected" : ""}>${esc(n.name)}</option>`).join("")}</select></label></div>
-      <label class="check"><input type="checkbox" name="admin_only" ${p.admin_only ? "checked" : ""}><span>Nur für Administratoren</span></label>`,
-    submit: pool ? "Speichern" : "Anlegen",
     wide: true,
+    submit: pool ? "Speichern" : "Anlegen",
+    fields: `
+      <div class="row"><label class="field"><span>Name</span><input type="text" name="name" value="${esc(p.name)}" placeholder="z. B. skrime Zusatz-IPs" required></label>
+        <label class="field"><span>Node</span><select name="node_id" id="pool-node"><option value="">Alle Nodes</option>${nodes.map((n) => `<option value="${n.id}" ${n.id === p.node_id ? "selected" : ""}>${esc(n.name)}</option>`).join("")}</select></label></div>
+
+      <div class="field"><span>Netzwerk-Modus</span>
+        <div class="seg" id="pool-mode"><button type="button" data-mode="routed">Geroutet (empfohlen)</button><button type="button" data-mode="bridged">Bridge</button></div>
+        <div class="hint" id="mode-hint"></div></div>
+
+      <div class="field"><span>Adressen</span>
+        <div class="seg" id="pool-source"><button type="button" data-source="list">Einzelne Adressen</button><button type="button" data-source="range">Ganzes Netz / Bereich</button></div></div>
+
+      <div id="src-list">
+        <label class="field"><span>IP-Adressen (eine pro Zeile, Komma getrennt oder als Bereich 1.2.3.10-15)</span>
+          <textarea name="address_list" id="pool-list" rows="6" placeholder="185.12.34.56&#10;185.12.34.57&#10;91.200.1.20">${esc(p.address_list || "")}</textarea></label>
+        <div style="display:flex;gap:10px;align-items:center;margin:-4px 0 14px;flex-wrap:wrap">
+          <button type="button" class="btn sm" id="pool-detect">${icon("refresh")}IPs und Gateway vom Node erkennen</button>
+          <span class="muted small" id="list-count"></span></div>
+        <div id="detect-box" class="hidden" style="margin-bottom:14px"></div>
+      </div>
+
+      <div id="net-fields">
+        <div class="row"><label class="field"><span id="net-label">Netz (CIDR)</span><input type="text" name="network" value="${esc(p.network || "")}" placeholder="203.0.113.0/24 oder 2001:db8::/64"></label>
+          <label class="field" id="gw-field"><span>Gateway</span><input type="text" name="gateway" value="${esc(p.gateway || "")}" placeholder="203.0.113.1"><div class="hint">Darf außerhalb des Netzes liegen (wird dann on-link geroutet).</div></label></div>
+        <div class="row" id="range-fields"><label class="field"><span>Erste vergebene IP (optional)</span><input type="text" name="range_start" value="${esc(p.range_start || "")}"></label>
+          <label class="field"><span>Letzte vergebene IP (optional)</span><input type="text" name="range_end" value="${esc(p.range_end || "")}"></label></div>
+      </div>
+
+      <div class="row"><label class="field"><span>DNS-Server</span><input type="text" name="dns" value="${esc(p.dns)}" placeholder="1.1.1.1, 8.8.8.8"></label>
+        <label class="field" id="bridge-field"><span>Bridge auf dem Node</span><input type="text" name="bridge" value="${esc(p.bridge === "pbr0" ? "vmbr0" : p.bridge)}"></label></div>
+      <label class="check"><input type="checkbox" name="admin_only" ${p.admin_only ? "checked" : ""}><span>Nur für Administratoren</span></label>`,
+    onReady: (mm) => {
+      const form = $("#modal-form", mm);
+      const nodeName = () => { const n = nodes.find((x) => x.id === +form.node_id.value) || (nodes.length === 1 ? nodes[0] : null); return n; };
+      const sync = () => {
+        $$("#pool-mode button", mm).forEach((b) => b.classList.toggle("active", b.dataset.mode === st.mode));
+        $$("#pool-source button", mm).forEach((b) => b.classList.toggle("active", b.dataset.source === st.source));
+        const routed = st.mode === "routed", list = st.source === "list";
+        const n = nodeName();
+        $("#mode-hint", mm).innerHTML = routed
+          ? `Für Zusatz-IPs ohne eigene MAC-Adresse (z. B. skrime, Hetzner, OVH). Der Node leitet die IPs an die Server weiter; jeder Server bekommt seine IP als /32 mit Gateway <code>${esc((n && n.info && n.info.main_ipv4) || "Haupt-IP des Nodes")}</code>. Beim Hoster muss nichts eingerichtet werden.`
+          : "Server hängen direkt im Netz des Hosters. Nur nutzen, wenn du ein eigenes Netz/VLAN hast oder der Hoster für jede IP eine eigene MAC-Adresse vergibt.";
+        $("#src-list", mm).classList.toggle("hidden", !list);
+        $("#net-fields", mm).classList.toggle("hidden", routed && list);
+        $("#range-fields", mm).classList.toggle("hidden", list);
+        $("#gw-field", mm).classList.toggle("hidden", routed);
+        $("#bridge-field", mm).classList.toggle("hidden", routed);
+        $("#net-label", mm).textContent = list ? "Netz, zu dem die Adressen gehören (CIDR)" : "Netz (CIDR)";
+        const count = form.address_list.value.split(/[\s,;]+/).filter(Boolean).length;
+        $("#list-count", mm).textContent = count ? `${count} ${count === 1 ? "Eintrag" : "Einträge"}` : "";
+      };
+      $$("#pool-mode button", mm).forEach((b) => b.onclick = () => { st.mode = b.dataset.mode; sync(); });
+      $$("#pool-source button", mm).forEach((b) => b.onclick = () => { st.source = b.dataset.source; sync(); });
+      form.addEventListener("input", sync);
+      form.node_id.addEventListener("change", sync);
+      $("#pool-detect", mm).onclick = async () => {
+        const n = nodeName();
+        const box = $("#detect-box", mm);
+        if (!n) { box.innerHTML = `<div class="alert warn">Bitte zuerst oben den Node wählen.</div>`; box.classList.remove("hidden"); return; }
+        box.innerHTML = `<span class="spinner"></span> Frage ${esc(n.name)} ab …`;
+        box.classList.remove("hidden");
+        let d;
+        try { d = await api(`/api/nodes/${n.id}/network`); } catch (e) { box.innerHTML = `<div class="alert bad">${esc(e.message)}</div>`; return; }
+        const current = new Set(form.address_list.value.split(/[\s,;]+/).filter(Boolean));
+        const rows = d.addresses.filter((a) => !a.main);
+        box.innerHTML = `<div class="card"><div class="card-body">
+          <div class="small" style="margin-bottom:8px">Haupt-IP: <code>${esc(d.main_ipv4)}</code> auf <code>${esc(d.uplink)}</code> · Standard-Gateway: <code>${esc(d.default_gateway || "–")}</code></div>
+          ${rows.length ? `<table><tbody>${rows.map((a) => {
+            const taken = a.pool && !current.has(a.address);
+            return `<tr><td style="width:30px"><input type="checkbox" class="det" value="${esc(a.address)}" data-net="${esc(a.network)}" ${taken ? "disabled" : a.public && !current.has(a.address) ? "checked" : ""} aria-label="${esc(a.address)}"></td>
+              <td class="mono">${esc(a.address)}/${a.prefix}</td><td class="small">${esc(a.interface)}</td>
+              <td class="small">${a.routed ? badge("an Server geroutet", "info") : a.pool ? badge(`in Pool ${a.pool}`, "plain") : a.public ? badge("öffentlich", "good") : badge("privat", "plain")}</td></tr>`;
+          }).join("")}</tbody></table>
+          <div style="margin-top:10px;display:flex;gap:8px"><button type="button" class="btn sm primary" id="det-apply">Ausgewählte übernehmen</button></div>`
+          : `<div class="alert warn">Außer der Haupt-IP ist auf dem Node keine weitere IPv4-Adresse eingetragen. Deine Zusatz-IPs stehen im Kundenbereich deines Hosters (bei skrime unter dem Server → IP-Adressen) – bitte dort kopieren und oben einfügen.</div>`}
+          <p class="muted small" style="margin:8px 0 0">Erkannt werden nur Adressen, die auf dem Server eingetragen sind. Im gerouteten Modus nimmt PomBot sie beim Vergeben automatisch von der Netzwerkkarte, damit sie beim Server ankommen.</p>
+        </div></div>`;
+        const apply = $("#det-apply", mm);
+        if (apply) apply.onclick = () => {
+          const picked = $$(".det:checked", mm);
+          const merged = [...current, ...picked.map((c) => c.value)];
+          form.address_list.value = [...new Set(merged)].join("\n");
+          if (st.mode === "bridged" && picked.length) {
+            if (!form.network.value) form.network.value = picked[0].dataset.net;
+            if (!form.gateway.value && d.default_gateway) form.gateway.value = d.default_gateway;
+          }
+          st.source = "list";
+          box.classList.add("hidden");
+          sync();
+          toast(`${picked.length} ${picked.length === 1 ? "Adresse" : "Adressen"} übernommen`);
+        };
+      };
+      sync();
+    },
     onSubmit: async (d, mm) => {
       d.node_id = d.node_id ? +d.node_id : null;
+      d.mode = st.mode;
+      if (st.source === "list") { d.range_start = null; d.range_end = null; if (st.mode === "routed") d.network = ""; }
+      else d.address_list = "";
+      if (st.mode === "routed") { d.gateway = null; d.bridge = "vmbr0"; }
       await api(pool ? `/api/pools/${pool.id}` : "/api/pools", { method: pool ? "PUT" : "POST", body: d });
       mm.close();
       toast("Gespeichert");
@@ -1347,9 +1436,11 @@ async function viewPools() {
     route();
   };
   setMain(`${pageHead("IP-Pools", "Adressbereiche, aus denen neue Server automatisch eine IP bekommen", `<button class="btn primary" data-act="addPool">${icon("plus")}Pool anlegen</button>`)}
-    <div class="card">${pools.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Netz</th><th>Gateway</th><th>Bridge</th><th>Node</th><th style="min-width:180px">Belegung</th><th></th></tr></thead><tbody>
+    <div class="card">${pools.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Modus</th><th>Adressen</th><th>Gateway</th><th>Node</th><th style="min-width:180px">Belegung</th><th></th></tr></thead><tbody>
       ${pools.map((p) => `<tr class="click" data-act="openPool" data-id="${p.id}"><td><strong>${esc(p.name)}</strong> ${p.admin_only ? badge("Admin", "plain") : ""}</td>
-        <td class="mono">${esc(p.network)}</td><td class="mono">${esc(p.gateway || "–")}</td><td><code>${esc(p.bridge)}</code></td><td>${esc(p.node || "Alle")}</td>
+        <td>${p.mode === "routed" ? badge("Geroutet", "info") : badge(`Bridge ${p.bridge}`, "plain")}</td>
+        <td class="mono small">${p.list_count ? `${p.list_count} einzelne` : esc(p.network)}</td>
+        <td class="mono small">${p.mode === "routed" ? "Node-IP (auto)" : esc(p.gateway || "–")}</td><td>${esc(p.node || "Alle")}</td>
         <td>${meter("", p.used, p.size, `${p.used} / ${p.size}`)}</td>
         <td class="right nowrap"><button class="btn sm" data-act="editPool" data-id="${p.id}">Bearbeiten</button> <button class="btn sm danger" data-act="deletePool" data-id="${p.id}">Löschen</button></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Noch keine IP-Pools. Lege einen Pool mit den IP-Adressen deines Hosters an – neue Server bekommen dann automatisch eine freie IP.<br><br><button class="btn primary" data-act="addPool">${icon("plus")}Pool anlegen</button></div>`}</div>`);
@@ -1373,7 +1464,7 @@ async function viewPool(params, m) {
     await api(`/api/pools/${id}/addresses/${ds.id}`, { method: "DELETE" });
     route();
   };
-  setMain(`${pageHead(`Pool ${esc(p.name)}`, `${esc(p.network)} · Gateway ${esc(p.gateway || "–")} · Bridge ${esc(p.bridge)}`, `<a class="btn" href="#/pools">Zurück</a><button class="btn primary" data-act="reserve">Adresse reservieren</button>`)}
+  setMain(`${pageHead(`Pool ${esc(p.name)}`, p.mode === "routed" ? `Geroutet · ${p.list_count ? `${p.list_count} einzelne Adressen` : esc(p.network)} · Node ${esc(p.node || "–")} · Gateway = Node-IP` : `${esc(p.network)} · Gateway ${esc(p.gateway || "–")} · Bridge ${esc(p.bridge)}`, `<a class="btn" href="#/pools">Zurück</a><button class="btn primary" data-act="reserve">Adresse reservieren</button>`)}
     <div class="grid grid-3" style="margin-bottom:16px">
       <div class="card stat"><div class="label">Belegt</div><div class="value">${p.used} / ${p.size}</div></div>
       <div class="card stat"><div class="label">Frei</div><div class="value">${p.size - p.used}</div></div>

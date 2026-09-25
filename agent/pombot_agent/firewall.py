@@ -121,7 +121,13 @@ def build_ruleset(configs: dict[str, dict]) -> str:
             lines.append(f"    {cfg['policy_out']}")
         lines.append("  }")
         jumps.append(f"    ether saddr {mac} jump out_{name}")
-    lines += ["  chain forward {", "    type filter hook forward priority 0; policy accept;", *jumps, "  }", "}"]
+    # forward: gebridgter Verkehr (Bridge-Modus). input/output: Verkehr zwischen Gast und Host –
+    # im gerouteten Modus (pbr0) läuft darüber der gesamte Internetverkehr des Gastes.
+    to_guest = [j for j in jumps if "ether daddr" in j]
+    from_guest = [j for j in jumps if "ether saddr" in j]
+    lines += ["  chain forward {", "    type filter hook forward priority 0; policy accept;", *jumps, "  }",
+              "  chain input {", "    type filter hook input priority 0; policy accept;", *from_guest, "  }",
+              "  chain output {", "    type filter hook output priority 0; policy accept;", *to_guest, "  }", "}"]
     return "\n".join(lines) + "\n"
 
 

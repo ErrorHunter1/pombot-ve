@@ -69,6 +69,8 @@ def node_supports(node: Node, gtype: str) -> bool:
 def pool_fits_node(pool: IPPool, node: Node) -> bool:
     if pool.node_id and pool.node_id != node.id:
         return False
+    if ipam.is_routed(pool):
+        return True  # pbr0 legt der Agent bei Bedarf selbst an
     bridges = node.info.get("bridges")
     return not bridges or pool.bridge in bridges
 
@@ -127,6 +129,9 @@ def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choic
             v6 = pick(v6_choice, 6, node)
         except LookupError:
             continue
+        if v4 and v6 and (ipam.is_routed(v4) or ipam.is_routed(v6)):
+            last_error = "Geroutete IPv4-Pools lassen sich derzeit nicht mit einem IPv6-Pool kombinieren"
+            continue
         if v4 and v6 and v4.bridge != v6.bridge:
             last_error = "IPv4- und IPv6-Pool müssen dieselbe Bridge nutzen"
             continue
@@ -164,6 +169,7 @@ def build_spec(db: Session, guest: Guest, template: Template, password: str | No
                ssh_keys: list[str], suffix: str = "1") -> dict:
     ips = sorted(guest.ips, key=lambda ip: ipam.version_of(ip.pool))
     pool = ips[0].pool if ips else None
+    routed = bool(pool and ipam.is_routed(pool))
     spec = {
         "name": guest.agent_name,
         "type": guest.type,
@@ -171,9 +177,10 @@ def build_spec(db: Session, guest: Guest, template: Template, password: str | No
         "cores": guest.cores,
         "memory_mb": guest.memory_mb,
         "disk_gb": guest.disk_gb,
-        "bridge": pool.bridge if pool else default_bridge(guest.node),
+        "bridge": ipam.ROUTED_BRIDGE if routed else pool.bridge if pool else default_bridge(guest.node),
+        "routed": routed,
         "mac": guest.mac,
-        "ips": [ipam.ip_spec(ip) for ip in ips],
+        "ips": [ipam.ip_spec(ip, guest.node) for ip in ips],
         "dns": ipam.pool_dns(pool),
         "password": password,
         "ssh_keys": ssh_keys,
@@ -312,8 +319,8 @@ def _agent_tarball() -> bytes:
         raise AgentError(f"Agent-Quellcode nicht gefunden unter {src} (POMBOT_AGENT_SRC)")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for item in ("pombot_agent", "requirements.txt", "pombot-agent.service", "install-agent.sh",
-                     "bridge-setup.sh"):
+        for item in ("pombot_agent", "requirements.txt", "pombot-agent.service", "pombot-network.service",
+                     "install-agent.sh", "bridge-setup.sh"):
             tar.add(src / item, arcname=item,
                     filter=lambda ti: None if "__pycache__" in ti.name else ti)
     return buf.getvalue()

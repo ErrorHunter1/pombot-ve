@@ -47,6 +47,14 @@ def _version(cmd) -> str | None:
         return None
 
 
+def _main_ipv4() -> str | None:
+    try:
+        parts = run(["ip", "-4", "route", "get", "1.1.1.1"], timeout=10).split()
+        return parts[parts.index("src") + 1]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def info() -> dict:
     du = shutil.disk_usage(DATA_DIR)
     return {
@@ -62,6 +70,7 @@ def info() -> dict:
         "libvirt": _version(["virsh", "--version"]),
         "lxc": _version(["lxc-start", "--version"]),
         "bridges": bridges(),
+        "main_ipv4": _main_ipv4(),
         "agent_version": VERSION,
     }
 

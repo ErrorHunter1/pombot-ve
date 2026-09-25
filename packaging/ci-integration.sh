@@ -127,4 +127,41 @@ sudo nft list table bridge pombot | grep -q pv100 && fail "Firewall-Regeln wurde
 api GET /api/pools | json '[(p["name"], p["used"]) for p in d]'
 end
 
+step "Geroutete Zusatz-IPs: Erkennung und Pool mit Einzeladressen"
+# Simuliert Zusatz-IPs wie bei skrime/Hetzner: eine davon ist direkt auf der Netzwerkkarte eingetragen
+UPLINK="$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')"
+sudo ip addr add 192.0.2.10/32 dev "$UPLINK"
+sudo iptables -t nat -A POSTROUTING -s 192.0.2.0/24 -o "$UPLINK" -j MASQUERADE   # nur im CI nötig (Test-Adressen)
+NODE_ID="$(api GET /api/nodes | json 'd[0]["id"]')"
+api POST "/api/nodes/$NODE_ID/refresh" > /dev/null
+api GET "/api/nodes/$NODE_ID/network" | json '[(a["address"], a["interface"], a["main"]) for a in d["addresses"]]' | tee /tmp/detect.txt
+grep -q "192.0.2.10" /tmp/detect.txt || fail "Erkennung findet die Zusatz-IP nicht"
+RPOOL="$(api POST /api/pools "{\"name\":\"zusatz\",\"mode\":\"routed\",\"node_id\":$NODE_ID,\"address_list\":\"192.0.2.10, 192.0.2.11\"}")"
+echo "$RPOOL"
+RPOOL_ID="$(echo "$RPOOL" | json 'd["id"]')"
+end
+
+step "Container im gerouteten Modus"
+RES="$(api POST /api/guests "{\"template_id\":$TPL,\"name\":\"ci-routed\",\"hostname\":\"ci-routed\",\"cores\":1,\"memory_mb\":512,\"disk_gb\":4,\"ipv4_pool\":$RPOOL_ID,\"password\":\"CiTestPasswort1\"}")"
+echo "$RES"
+RGID="$(echo "$RES" | json 'd["guest_id"]')"
+RVMID="$(echo "$RES" | json 'd["vmid"]')"
+wait_task "$(echo "$RES" | json 'd["task_id"]')" 1200
+ip -4 addr show dev "$UPLINK" | grep -q "192.0.2.10" && fail "Zusatz-IP wurde nicht von der Netzwerkkarte des Hosts genommen"
+ip route show 192.0.2.10 | tee /dev/stderr | grep -q pbr0 || fail "Route zu 192.0.2.10 über pbr0 fehlt"
+sysctl net.ipv4.ip_forward "net.ipv4.conf.$UPLINK.proxy_arp"
+sudo lxc-attach -n "pv$RVMID" -- ip -4 addr show eth0 | grep -q "192.0.2.10/32" || fail "IP /32 nicht im Container"
+sudo lxc-attach -n "pv$RVMID" -- ip route | tee /dev/stderr | grep -q "default via" || fail "Default-Route fehlt im Container"
+ping -c 2 -W 2 192.0.2.10 || fail "Gerouteter Container nicht erreichbar"
+sudo lxc-attach -n "pv$RVMID" -- ping -c 2 -W 3 1.1.1.1 || fail "Gerouteter Container hat kein Internet"
+sudo lxc-attach -n "pv$RVMID" -- test -x /usr/sbin/sshd || fail "SSH im gerouteten Container nicht installiert"
+sudo nft list chain bridge pombot input | grep -q "jump out_pv$RVMID" || fail "Spoofing-Schutz greift im gerouteten Modus nicht"
+end
+
+step "Geroutet: Löschen entfernt Route"
+wait_task "$(api DELETE "/api/guests/$RGID" | json 'd["task_id"]')" 300
+ip route show 192.0.2.10 | grep -q pbr0 && fail "Route wurde nicht entfernt"
+api GET /api/pools | json '[(p["name"], p["used"], p["size"]) for p in d]'
+end
+
 echo "Integrationstest erfolgreich."

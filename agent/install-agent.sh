@@ -74,8 +74,8 @@ log "Kopiere Agent nach /opt/pombot/agent …"
 mkdir -p /opt/pombot/agent /etc/pombot
 if [ "$(readlink -f "$SRC")" != "/opt/pombot/agent" ]; then
   rm -rf /opt/pombot/agent/pombot_agent
-  cp -r "$SRC/pombot_agent" "$SRC/requirements.txt" "$SRC/pombot-agent.service" "$SRC/install-agent.sh" \
-        "$SRC/bridge-setup.sh" /opt/pombot/agent/
+  cp -r "$SRC/pombot_agent" "$SRC/requirements.txt" "$SRC/pombot-agent.service" "$SRC/pombot-network.service" \
+        "$SRC/install-agent.sh" "$SRC/bridge-setup.sh" /opt/pombot/agent/
 fi
 [ -x /opt/pombot/agent/venv/bin/python ] || python3 -m venv /opt/pombot/agent/venv
 /opt/pombot/agent/venv/bin/pip install -q --disable-pip-version-check --upgrade pip
@@ -122,8 +122,12 @@ if [ ! -f /etc/pombot/agent-cert.pem ]; then
 fi
 
 log "Starte Dienst pombot-agent …"
-[ "$PACKAGE" -eq 1 ] || cp /opt/pombot/agent/pombot-agent.service /etc/systemd/system/pombot-agent.service
+if [ "$PACKAGE" -eq 0 ]; then
+  cp /opt/pombot/agent/pombot-agent.service /etc/systemd/system/pombot-agent.service
+  cp /opt/pombot/agent/pombot-network.service /etc/systemd/system/pombot-network.service
+fi
 systemctl daemon-reload
+systemctl enable pombot-network >/dev/null 2>&1
 systemctl enable pombot-agent >/dev/null 2>&1
 systemctl restart pombot-agent
 

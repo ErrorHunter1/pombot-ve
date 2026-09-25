@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, host, images, kvm, lxc
+from . import console, firewall, host, images, kvm, lxc, routed
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -23,6 +23,10 @@ async def lifespan(_: FastAPI):
     # (z. B. falls jemand `systemctl restart nftables` ausführt und damit alles leert).
     async def watchdog():
         while True:
+            try:
+                await asyncio.to_thread(routed.ensure_all)
+            except Exception as exc:  # noqa: BLE001
+                log.error("Geroutetes Netz konnte nicht eingerichtet werden: %s", exc)
             try:
                 await asyncio.to_thread(firewall.ensure_loaded)
             except Exception as exc:  # noqa: BLE001
@@ -96,6 +100,11 @@ def host_info():
     return host.info()
 
 
+@app.get("/host/network", dependencies=[Depends(auth)])
+def host_network():
+    return routed.network_info()
+
+
 @app.get("/host/stats", dependencies=[Depends(auth)])
 def host_stats():
     return host.stats()
@@ -136,6 +145,7 @@ class CreateSpec(BaseModel):
     lxc_dist: str | None = None
     lxc_release: str | None = None
     instance_suffix: str = "1"
+    routed: bool = False  # Zusatz-IPs über pbr0 routen statt direkt bridgen
 
 
 @app.get("/guests", dependencies=[Depends(auth)])
@@ -158,13 +168,23 @@ def guest_create(spec: CreateSpec):
         ipaddress.ip_address(server)
     data = spec.model_dump()
     data["ips"] = [ip.model_dump() for ip in spec.ips]
-    if spec.type == "kvm":
-        if not (spec.image_url or spec.iso_url):
-            raise HTTPException(400, "image_url oder iso_url erforderlich")
-        return job_response(start_job("create", spec.name, kvm.create, data))
-    if not (spec.lxc_dist and spec.lxc_release):
+    if spec.type == "kvm" and not (spec.image_url or spec.iso_url):
+        raise HTTPException(400, "image_url oder iso_url erforderlich")
+    if spec.type == "lxc" and not (spec.lxc_dist and spec.lxc_release):
         raise HTTPException(400, "lxc_dist und lxc_release erforderlich")
-    return job_response(start_job("create", spec.name, lxc.create, data))
+    if spec.routed and spec.bridge != routed.BRIDGE:
+        raise HTTPException(400, f"Geroutete Gäste müssen an {routed.BRIDGE} hängen")
+    mod = kvm if spec.type == "kvm" else lxc
+
+    def _create(job, d):
+        if d["routed"]:
+            routed.set_guest(d["name"], [ip["address"] for ip in d["ips"] if ip["version"] == 4], job)
+        try:
+            return mod.create(job, d)
+        except Exception:
+            routed.remove_guest(d["name"])
+            raise
+    return job_response(start_job("create", spec.name, _create, data))
 
 
 @app.get("/guests/{name}", dependencies=[Depends(auth)])
@@ -180,6 +200,7 @@ def guest_delete(name: str):
     def _delete(job, n):
         result = mod.delete(job, n)
         firewall.remove(n)
+        routed.remove_guest(n)
         return result
     return job_response(start_job("delete", name, _delete, name))
 

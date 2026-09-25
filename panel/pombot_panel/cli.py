@@ -5,7 +5,7 @@ import sys
 from sqlalchemy import func, select
 
 from . import ops
-from .db import Base, SessionLocal, engine
+from .db import SessionLocal, migrate
 from .models import User
 from .routers.system import seed_templates
 from .security import generate_password, hash_password
@@ -30,7 +30,7 @@ def main() -> int:
     sub.add_parser("list-users", help="Benutzer auflisten")
 
     args = parser.parse_args()
-    Base.metadata.create_all(engine)
+    migrate()
     with SessionLocal() as db:
         seed_templates(db)
         if args.cmd == "create-admin":

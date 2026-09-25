@@ -65,7 +65,9 @@ class IPPool(Base):
     __tablename__ = "ip_pools"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
-    network: Mapped[str] = mapped_column(String(64))  # z. B. 203.0.113.0/24
+    network: Mapped[str] = mapped_column(String(64), default="")  # z. B. 203.0.113.0/24 (bei Listen optional)
+    mode: Mapped[str] = mapped_column(String(8), default="bridged")  # bridged | routed
+    address_list: Mapped[str] = mapped_column(Text, default="")  # einzelne Adressen statt Bereich
     gateway: Mapped[str | None] = mapped_column(String(64))
     dns: Mapped[str] = mapped_column(String(255), default="")
     bridge: Mapped[str] = mapped_column(String(32), default="vmbr0")

@@ -27,7 +27,8 @@ def node_dict(n: Node, admin: bool) -> dict:
         "committed_memory_mb": sum(g.memory_mb for g in n.guests),
         "committed_cores": sum(g.cores for g in n.guests),
         "info": {k: info.get(k) for k in ("os", "cpu_cores", "memory_total", "disk_total", "kvm", "bridges",
-                                          "libvirt", "lxc", "cpu_model", "kernel", "agent_version", "hostname")},
+                                          "libvirt", "lxc", "cpu_model", "kernel", "agent_version", "hostname",
+                                          "main_ipv4")},
         "stats": stats,
         "last_seen": n.last_seen.isoformat() + "Z" if n.last_seen else None,
     }
@@ -176,6 +177,21 @@ def node_image_delete(node_id: int, image_id: str, user: User = Depends(require_
         return _node_client(db, node_id).request("DELETE", f"/images/{image_id}")
     except AgentError as exc:
         raise HTTPException(400, str(exc))
+
+
+@router.get("/{node_id}/network")
+def node_network(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Automatisch erkannte IPv4-Adressen und Gateways des Nodes, inkl. Hinweis, ob schon in einem Pool."""
+    from .. import ipam
+    from ..models import IPPool
+    try:
+        data = _node_client(db, node_id).request("GET", "/host/network", timeout=20)
+    except AgentError as exc:
+        raise HTTPException(502, f"Erkennung fehlgeschlagen (Agent aktuell?): {exc}")
+    pools = list(db.scalars(select(IPPool)))
+    for a in data.get("addresses", []):
+        a["pool"] = next((p.name for p in pools if ipam.version_of(p) == 4 and ipam.contains(p, a["address"])), None)
+    return data
 
 
 @router.get("/{node_id}/backups")

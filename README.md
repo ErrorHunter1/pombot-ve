@@ -32,11 +32,11 @@ und auf den Server kopieren (das Repository ist privat, z. B. mit
 
 ```bash
 # Panel (Web-Oberfläche)
-sudo apt install ./pombot-panel_0.2.0_all.deb
+sudo apt install ./pombot-panel_0.3.0_all.deb
 sudo cat /root/pombot-admin.txt          # Adresse + Admin-Passwort
 
 # Node (auch auf demselben Server möglich) – gibt einen Join-Code aus
-sudo apt install ./pombot-agent_0.2.0_all.deb
+sudo apt install ./pombot-agent_0.3.0_all.deb
 ```
 
 `apt` installiert automatisch alle Abhängigkeiten (QEMU, libvirt, LXC, nftables …). Updates: neues Paket
@@ -71,17 +71,24 @@ prüft das Zertifikat jedes Agents fest (Pinning).
 
 ### Netzwerk / IP-Pools
 
-1. Jeder Node braucht eine Linux-Bridge (Standard `vmbr0`), an der die VMs hängen. Beim Hinzufügen per SSH
-   kann sie automatisch angelegt werden (netplan oder ifupdown, Backup der alten Konfiguration unter
-   `/etc/pombot/network-backup-*`).
-2. Unter **IP-Pools** die Adressen deines Hosters eintragen (Netz, Gateway, DNS, optional Bereich).
-   Das Gateway darf außerhalb des Netzes liegen (z. B. Hetzner `172.31.1.1` bei /32-Adressen) und wird
-   dann on-link geroutet.
-3. Beim Erstellen eines Servers wird die nächste freie Adresse vergeben und per cloud-init (VM) bzw.
-   direkt im Container (netplan / systemd-networkd / ifupdown) eingetragen. Beim Löschen wird sie frei.
+Unter **IP-Pools** trägst du die Adressen deines Hosters ein – entweder als **einzelne Adressen**
+(z. B. 7 gebuchte Zusatz-IPs, auch als Bereich `91.200.5.20-23`) oder als **ganzes Netz** (CIDR).
+Mit **„IPs und Gateway vom Node erkennen“** liest PomBot alle auf dem Server eingetragenen IPv4-Adressen
+und das Gateway aus und übernimmt sie per Klick.
 
-> Viele Hoster (z. B. Hetzner Dedicated) lassen zusätzliche IPs nur mit **eigener MAC-Adresse** oder
-> **gerouteten Subnetzen** zu. Für gebridgte Einzel-IPs muss dort ggf. eine virtuelle MAC beantragt werden.
+Zwei Netzwerk-Modi:
+
+| Modus | Wann | Wie es funktioniert |
+|---|---|---|
+| **Geroutet** (empfohlen) | Zusatz-IPs ohne eigene MAC-Adresse (skrime, Hetzner, OVH, Netcup …) | Der Node nimmt die IPs per Proxy-ARP entgegen und leitet sie über die interne Bridge `pbr0` weiter. Jeder Server bekommt seine IP als `/32`, Gateway ist automatisch die Haupt-IP des Nodes. Beim Hoster ist nichts einzurichten. |
+| **Bridge** | Eigenes Netz/VLAN oder Hoster vergibt pro IP eine MAC | Server hängen direkt an einer Bridge (z. B. `vmbr0`) im Netz des Hosters. |
+
+Im gerouteten Modus nimmt PomBot eine Zusatz-IP automatisch von der Netzwerkkarte des Hosts, falls sie dort
+eingetragen war (sonst würde der Host sie selbst beantworten). Die Haupt-IP bleibt immer unangetastet.
+Bridge, Routen und Proxy-ARP stellt der Dienst `pombot-network` nach jedem Neustart wieder her.
+
+Für den Bridge-Modus braucht jeder Node eine Linux-Bridge (Standard `vmbr0`). Beim Hinzufügen per SSH kann
+sie automatisch angelegt werden (Backup der alten Konfiguration unter `/etc/pombot/network-backup-*`).
 
 ### Discord-Login
 
