@@ -95,8 +95,9 @@ php artisan p:user:make --email="${APP_EMAIL}" --username="${APP_ADMIN:-admin}" 
 chown -R www-data:www-data /var/www/pterodactyl
 
 log "Warteschlange und Zeitplan einrichten …"
-( crontab -l 2>/dev/null | grep -v 'pterodactyl/artisan schedule:run'; \
-  echo '* * * * * php /var/www/pterodactyl/artisan schedule:run >> /dev/null 2>&1' ) | crontab -
+{ crontab -l 2>/dev/null | grep -v 'pterodactyl/artisan schedule:run' || true
+  echo '* * * * * php /var/www/pterodactyl/artisan schedule:run >> /dev/null 2>&1'; } | crontab -
+crontab -l | grep -q 'artisan schedule:run' || { echo "Cronjob fehlt"; exit 1; }
 cat > /etc/systemd/system/pteroq.service <<'EOF'
 [Unit]
 Description=Pterodactyl Queue Worker

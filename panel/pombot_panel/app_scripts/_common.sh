@@ -9,7 +9,11 @@ log() { echo "==> $(date +%T) $*"; }
 info() { echo "$*" >> "$INFO"; }
 APT="apt-get -q -o DPkg::Lock::Timeout=900 -o Acquire::Retries=3"
 apt_install() { $APT update; $APT install -y --no-install-recommends "$@"; }
-genpw() { tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-20}" || true; }
+genpw() {  # zufälliges Passwort aus Buchstaben und Ziffern (ohne Pipe zu head: kein "Broken pipe")
+  local s=""
+  while [ "${#s}" -lt "${1:-20}" ]; do s="${s}$(openssl rand -base64 96 | tr -dc 'A-Za-z0-9')"; done
+  echo "${s:0:${1:-20}}"
+}
 install_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     log "Installiere Docker (get.docker.com) …"
