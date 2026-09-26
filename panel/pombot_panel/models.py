@@ -223,6 +223,21 @@ class BackupSchedule(Base):
     last_status: Mapped[str | None] = mapped_column(String(16))
 
 
+class ApiToken(Base):
+    """Token für die REST-API (nur Hash gespeichert). Handelt mit den Rechten des Admins, der es angelegt hat."""
+    __tablename__ = "api_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    prefix: Mapped[str] = mapped_column(String(16))  # Anfang des Tokens zum Wiedererkennen
+    read_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_ip: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class Setting(Base):
     """Einfache Schlüssel/Wert-Einstellungen (z. B. Zähler für VMIDs)."""
     __tablename__ = "settings"

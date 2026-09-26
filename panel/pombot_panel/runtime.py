@@ -33,6 +33,7 @@ EDITABLE: dict[str, str] = {
     "antispoof": "bool",
     "max_auto_backups": "int",
     "update_check_hours": "int",
+    "api_enabled": "bool",
     "cloudflare_token": "secret",
     "acme_email": "str",
     "panel_domain": "str",

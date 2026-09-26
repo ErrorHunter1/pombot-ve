@@ -201,6 +201,11 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
   Passwort und neuen SSH-Hostschlüsseln (VMs laufen dabei weiter, Container werden kurz gestoppt).
 - **Optionen pro Server:** Start beim Booten des Nodes an/aus, Löschschutz (kein Löschen/Neuinstallieren),
   Tags mit Filter in der Serverliste (`#tag`).
+- **REST-API** (Einstellungen → REST-API): im Adminbereich ein-/ausschaltbar (Standard: aus). Zugriff per
+  API-Token (`Authorization: Bearer pbt_…`), das nur Administratoren anlegen können – optional nur lesend und mit
+  Ablaufdatum; gespeichert wird nur ein Hash. Umfasst alles, was die Oberfläche kann (Server erstellen, steuern,
+  Backups, Nodes, IP-Pools …). Die **Dokumentation** mit allen Endpunkten, Parametern, curl-Beispielen und
+  „Ausprobieren“ gibt es im Panel unter REST-API → Dokumentation (nur für angemeldete Admins).
 - **Branding & SEO:** Name, Seitentitel, Meta-Beschreibung, Schlüsselwörter, Indexierung durch Suchmaschinen
   an/aus (`robots.txt`, `noindex`), Tab-Icon, Logo und Vorschaubild für geteilte Links
   (Einstellungen → Branding & SEO).

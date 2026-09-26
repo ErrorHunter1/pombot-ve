@@ -389,6 +389,7 @@ const ROUTES = [
   [/^tasks$/, viewTasks],
   [/^audit$/, viewAudit],
   [/^settings(?:\/(\w+))?$/, viewSettings],
+  [/^api-docs$/, viewApiDocs],
   [/^account$/, viewAccount],
 ];
 
@@ -2582,10 +2583,11 @@ async function viewSettings(params, m, silent, seq) {
   const tab = m[1] || "general";
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["update", "Updates"]]);
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["api", "REST-API"], ["update", "Updates"]]);
   if (tab === "cloudflare") return settingsCloudflare(head);
   if (tab === "update") return settingsUpdate(head, silent, seq);
   if (tab === "branding") return settingsBranding(head);
+  if (tab === "api") return settingsApi(head);
   if (tab === "backups") return settingsBackupTargets(head);
   if (tab === "storage") return settingsStorages(head);
   if (tab === "domain") return settingsDomain(head);
@@ -2823,6 +2825,191 @@ async function viewAccount(params) {
   };
 }
 
+// ------------------------------------------------------------------ REST-API (Einstellungen + Dokumentation)
+
+async function settingsApi(head) {
+  const d = await api("/api/admin/api");
+  S.handlers.apiToggle = async () => {
+    const on = !d.enabled;
+    if (on && !(await confirmBox("REST-API einschalten?", "Mit einem API-Token kann ein Programm alles tun, was sein Admin im Panel darf. Tokens wie Passwörter behandeln.", { ok: "Einschalten" }))) return;
+    await api("/api/admin/api", { method: "PUT", body: { enabled: on } });
+    toast(on ? "REST-API eingeschaltet" : "REST-API ausgeschaltet – alle Tokens sind vorübergehend ungültig", on ? "good" : "");
+    route(true);
+  };
+  S.handlers.tokenNew = () => formModal({
+    title: "API-Token erstellen", submit: "Erstellen",
+    fields: `<label class="field"><span>Name (wofür?)</span><input type="text" name="name" maxlength="64" placeholder="z. B. WHMCS, Monitoring, Skript" required></label>
+      <div class="row"><label class="field"><span>Rechte</span><select name="read_only"><option value="0">Lesen und schreiben</option><option value="1">Nur lesen (GET)</option></select></label>
+      <label class="field"><span>Gültig</span><select name="expires_days"><option value="">Unbegrenzt</option><option value="30">30 Tage</option><option value="90">90 Tage</option><option value="365">1 Jahr</option></select></label></div>
+      <p class="muted small" style="margin:0">Das Token handelt mit deinen Rechten (Administrator). Es wird nur einmal angezeigt.</p>`,
+    onSubmit: async (f, mm) => {
+      const r = await api("/api/admin/api/tokens", { method: "POST", body: { name: f.name, read_only: f.read_only === "1", expires_days: f.expires_days ? +f.expires_days : null } });
+      mm.close();
+      showSecret("API-Token erstellt", `Token <strong>${esc(r.name)}</strong> – jetzt kopieren, es wird nicht noch einmal angezeigt:`, r.token);
+      route(true);
+    },
+  });
+  S.handlers.tokenDel = async (ds) => {
+    if (!(await confirmBox("Token widerrufen?", "Programme, die dieses Token nutzen, verlieren sofort den Zugriff.", { danger: true, ok: "Widerrufen" }))) return;
+    await api(`/api/admin/api/tokens/${ds.id}`, { method: "DELETE" });
+    toast("Token widerrufen");
+    route(true);
+  };
+  const example = `curl -H "Authorization: Bearer pbt_…" ${d.base_url}/api/guests?all=true`;
+  setMain(head + `<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>REST-API</h2>${d.enabled ? badge("Eingeschaltet", "good live") : badge("Ausgeschaltet")}</div><div class="card-body">
+      <p class="muted" style="margin-top:0">Über die REST-API können eigene Programme das Panel steuern – z. B. Server automatisch anlegen (Shop, WHMCS), Monitoring oder Skripte. Sie umfasst alles, was die Oberfläche kann.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn ${d.enabled ? "danger" : "primary"}" data-act="apiToggle">${d.enabled ? "Ausschalten" : "Einschalten"}</button>
+        <a class="btn" href="#/api-docs">${icon("list")}Dokumentation öffnen</a>
+      </div>
+      <h3 style="margin:18px 0 8px;font-size:14px">So geht's</h3>
+      <ol class="small" style="padding-left:18px;margin:0;line-height:1.7">
+        <li>REST-API einschalten und rechts ein Token erstellen.</li>
+        <li>Bei jeder Anfrage mitschicken: <code>Authorization: Bearer &lt;Token&gt;</code></li>
+        <li>Alle Endpunkte mit Beispielen stehen in der <a href="#/api-docs">Dokumentation</a>.</li>
+      </ol>
+      <div class="secret" style="margin-top:12px"><span class="mono small" style="overflow-wrap:anywhere">${esc(example)}</span><button class="btn sm" data-copy="${esc(example)}">Kopieren</button></div>
+    </div></div>
+    <div class="card"><div class="card-head"><h2>API-Tokens</h2><button class="btn primary sm" data-act="tokenNew">${icon("plus")}Token erstellen</button></div>
+      ${d.tokens.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Token</th><th>Rechte</th><th>Zuletzt benutzt</th><th>Gültig bis</th><th class="no-sort"></th></tr></thead><tbody>
+        ${d.tokens.map((t) => `<tr><td><strong>${esc(t.name)}</strong><div class="muted small">von ${esc(t.user || "–")}</div></td>
+          <td class="mono small">${esc(t.prefix)}…</td><td>${t.read_only ? badge("nur lesen", "info") : badge("lesen + schreiben", "warn")}</td>
+          <td class="small">${t.last_used_at ? `${fmtDate(t.last_used_at)}<div class="muted mono">${esc(t.last_ip || "")}</div>` : `<span class="muted">nie</span>`}</td>
+          <td class="small">${t.expires_at ? (t.expired ? badge("abgelaufen", "bad") : fmtDate(t.expires_at)) : "unbegrenzt"}</td>
+          <td class="right"><button class="btn sm danger" data-act="tokenDel" data-id="${t.id}">Widerrufen</button></td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">Noch keine Tokens.</div>`}
+      ${!d.enabled && d.tokens.length ? `<div class="card-body"><div class="alert warn">Die REST-API ist ausgeschaltet – Tokens werden abgelehnt, bis du sie einschaltest.</div></div>` : ""}
+    </div></div>`);
+}
+
+const HTTP_METHODS = ["get", "post", "put", "patch", "delete"];
+
+function schemaExample(schema, spec, depth = 0) {
+  if (!schema || depth > 5) return null;
+  if (schema.$ref) return schemaExample(spec.components.schemas[schema.$ref.split("/").pop()], spec, depth + 1);
+  if (schema.anyOf) return schemaExample(schema.anyOf.find((s) => s.type !== "null") || schema.anyOf[0], spec, depth + 1);
+  if (schema.default !== undefined) return schema.default;
+  if (schema.enum) return schema.enum[0];
+  switch (schema.type) {
+    case "object": {
+      const out = {};
+      Object.entries(schema.properties || {}).forEach(([k, v]) => { out[k] = schemaExample(v, spec, depth + 1); });
+      return out;
+    }
+    case "array": return [schemaExample(schema.items, spec, depth + 1)].filter((x) => x !== null);
+    case "integer": return schema.minimum ?? 1;
+    case "number": return 1;
+    case "boolean": return false;
+    case "string": return schema.pattern ? `<${schema.title || "Text"}>` : schema.title || "";
+    default: return null;
+  }
+}
+
+function schemaFields(schema, spec) {
+  if (!schema) return [];
+  if (schema.$ref) schema = spec.components.schemas[schema.$ref.split("/").pop()];
+  const req = new Set(schema.required || []);
+  return Object.entries(schema.properties || {}).map(([k, v]) => {
+    const t = v.anyOf ? v.anyOf.map((x) => x.type || (x.$ref ? x.$ref.split("/").pop() : "")).filter(Boolean).join(" | ")
+      : v.$ref ? v.$ref.split("/").pop() : v.type === "array" ? `${(v.items && (v.items.type || (v.items.$ref || "").split("/").pop())) || ""}[]` : v.type;
+    const rules = [v.pattern && `Muster ${v.pattern}`, v.minimum !== undefined && `≥ ${v.minimum}`, v.maximum !== undefined && `≤ ${v.maximum}`,
+      v.maxLength && `max. ${v.maxLength} Zeichen`, v.default !== undefined && v.default !== null && `Standard: ${JSON.stringify(v.default)}`].filter(Boolean).join(" · ");
+    return { name: k, type: t || "", required: req.has(k), rules };
+  });
+}
+
+async function viewApiDocs(params) {
+  if (S.me.role !== "admin") { setMain(`<div class="alert bad">Die API-Dokumentation ist nur für Administratoren.</div>`); return; }
+  const [spec, st] = await Promise.all([api("/api/admin/api/openapi.json"), api("/api/admin/api")]);
+  const ops = [];
+  Object.entries(spec.paths).forEach(([path, item]) => HTTP_METHODS.forEach((m) => {
+    if (item[m]) ops.push({ path, method: m, op: item[m], tag: (item[m].tags || ["sonstiges"])[0] });
+  }));
+  const tags = spec.tags.map((t) => t.name).filter((t) => ops.some((o) => o.tag === t));
+  const tagTitle = (t) => (spec.tags.find((x) => x.name === t) || {})["x-displayName"] || t;
+  const q = params.get("q") || "";
+  const opId = (o) => `${o.method}-${o.path}`.replace(/[^a-z0-9]+/gi, "-");
+  const bodySchema = (o) => o.op.requestBody && o.op.requestBody.content && o.op.requestBody.content["application/json"] && o.op.requestBody.content["application/json"].schema;
+  const curl = (o) => {
+    const b = bodySchema(o);
+    const body = b ? ` \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify(schemaExample(b, spec))}'` : "";
+    return `curl -X ${o.method.toUpperCase()} "${spec.servers[0].url}${o.path}" \\\n  -H "Authorization: Bearer $POMBOT_TOKEN"${body}`;
+  };
+  const opHtml = (o) => {
+    const params = (o.op.parameters || []);
+    const b = bodySchema(o);
+    const fields = schemaFields(b, spec);
+    return `<details class="api-op" id="${opId(o)}" data-search="${esc(`${o.method} ${o.path} ${o.op.summary || ""} ${o.op.description || ""}`.toLowerCase())}">
+      <summary><span class="api-method ${o.method}">${o.method.toUpperCase()}</span><code class="api-path">${esc(o.path)}</code><span class="api-sum">${esc(o.op.summary || "")}</span></summary>
+      <div class="api-body">
+        ${o.op.description ? `<p style="margin-top:0">${esc(o.op.description)}</p>` : ""}
+        ${params.length ? `<h4>Parameter</h4><table class="api-table"><tbody>${params.map((p) => `<tr><td><code>${esc(p.name)}</code>${p.required ? " <span class='req'>*</span>" : ""}</td>
+          <td class="muted">${esc(p.in === "path" ? "im Pfad" : "Query")}</td><td class="mono small">${esc((p.schema && (p.schema.type || (p.schema.anyOf || []).map((x) => x.type).join(" | "))) || "")}</td></tr>`).join("")}</tbody></table>` : ""}
+        ${fields.length ? `<h4>Body (JSON)</h4><table class="api-table"><tbody>${fields.map((f) => `<tr><td><code>${esc(f.name)}</code>${f.required ? " <span class='req'>*</span>" : ""}</td>
+          <td class="mono small">${esc(f.type)}</td><td class="muted small">${esc(f.rules)}</td></tr>`).join("")}</tbody></table>` : ""}
+        <h4>Beispiel</h4><div class="api-code"><pre>${esc(curl(o))}</pre><button class="btn sm" data-copy="${esc(curl(o))}">Kopieren</button></div>
+        <h4>Ausprobieren <span class="muted small">(mit deiner Anmeldung im Panel)</span></h4>
+        <div class="api-try" data-method="${o.method}" data-path="${esc(o.path)}">
+          ${[...o.path.matchAll(/\{(\w+)\}/g)].map((m) => `<label class="field inline"><span>${esc(m[1])}</span><input type="text" data-pp="${esc(m[1])}" placeholder="${esc(m[1])}"></label>`).join("")}
+          ${params.filter((p) => p.in === "query").map((p) => `<label class="field inline"><span>${esc(p.name)}</span><input type="text" data-qp="${esc(p.name)}"></label>`).join("")}
+          ${b ? `<textarea class="mono small" rows="5" data-body>${esc(JSON.stringify(schemaExample(b, spec), null, 2))}</textarea>` : ""}
+          <div class="row" style="gap:8px;align-items:center"><button class="btn sm primary" data-act="apiTry">Senden</button>
+            ${o.method !== "get" ? `<span class="muted small">Achtung: führt die Aktion wirklich aus.</span>` : ""}</div>
+          <pre class="api-result hidden"></pre>
+        </div>
+      </div></details>`;
+  };
+  S.handlers.apiTry = async (ds, el) => {
+    const box = el.closest(".api-try");
+    let path = box.dataset.path;
+    let missing = false;
+    $$("[data-pp]", box).forEach((i) => { if (!i.value.trim()) missing = true; path = path.replace(`{${i.dataset.pp}}`, encodeURIComponent(i.value.trim())); });
+    if (missing) return toast("Bitte alle Pfad-Parameter ausfüllen", "bad");
+    const qs = new URLSearchParams();
+    $$("[data-qp]", box).forEach((i) => { if (i.value.trim()) qs.set(i.dataset.qp, i.value.trim()); });
+    const ta = $("[data-body]", box);
+    let body;
+    if (ta) { try { body = ta.value.trim() ? JSON.parse(ta.value) : undefined; } catch (e) { return toast("Body ist kein gültiges JSON", "bad"); } }
+    const out = $(".api-result", box);
+    out.classList.remove("hidden");
+    out.textContent = "…";
+    const t0 = performance.now();
+    const res = await fetch(path + (qs.toString() ? `?${qs}` : ""), { method: box.dataset.method.toUpperCase(), credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-PomBot": "1" }, body: body !== undefined ? JSON.stringify(body) : undefined });
+    const text = await res.text();
+    let pretty = text;
+    try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* kein JSON */ }
+    out.className = `api-result ${res.ok ? "ok" : "bad"}`;
+    out.textContent = `HTTP ${res.status} · ${Math.round(performance.now() - t0)} ms\n\n${pretty.slice(0, 20000)}`;
+  };
+  setMain(`${pageHead("REST-API", `Version ${esc(spec.info.version)} · ${ops.length} Endpunkte`,
+      `<a class="btn" href="#/settings/api">${icon("gear")}Tokens & Einstellungen</a>`)}
+    ${st.enabled ? "" : `<div class="alert warn" style="margin-bottom:16px">Die REST-API ist ausgeschaltet – Anfragen mit Token werden abgelehnt. <a href="#/settings/api">Einschalten</a></div>`}
+    <div class="card" style="margin-bottom:16px"><div class="card-body">
+      <h3 style="margin-top:0;font-size:15px">Anmeldung</h3>
+      <p style="margin:0 0 10px">Jede Anfrage braucht ein API-Token im Header: <code>Authorization: Bearer pbt_…</code>. Tokens erstellen Administratoren unter <a href="#/settings/api">Einstellungen → REST-API</a>; ein Token hat die Rechte seines Admins (oder nur Lesen).
+        Antworten sind JSON. Fehler kommen als <code>{"detail": "…"}</code> mit HTTP-Status 400/401/403/404/409/502.
+        Lange Vorgänge (Erstellen, Backup …) liefern eine <code>task_id</code> – Fortschritt über <code>GET /api/tasks/{task_id}</code>.</p>
+      <div class="api-code"><pre>${esc(`export POMBOT_TOKEN="pbt_…"\ncurl -H "Authorization: Bearer $POMBOT_TOKEN" ${spec.servers[0].url}/api/guests?all=true`)}</pre></div>
+    </div></div>
+    <div class="api-layout">
+      <nav class="api-nav card"><input type="text" id="api-filter" placeholder="Endpunkt suchen …" value="${esc(q)}">
+        ${tags.map((t) => `<a href="#/api-docs" data-tagjump="${esc(t)}">${esc(tagTitle(t))} <span class="muted">${ops.filter((o) => o.tag === t).length}</span></a>`).join("")}</nav>
+      <div class="api-main">${tags.map((t) => `<section class="api-tag" id="tag-${esc(t)}">
+        <h2>${esc(tagTitle(t))}</h2><p class="muted small" style="margin-top:0">${esc((spec.tags.find((x) => x.name === t) || {}).description || "")}</p>
+        ${ops.filter((o) => o.tag === t).map(opHtml).join("")}</section>`).join("")}</div>
+    </div>`);
+  const filter = () => {
+    const v = $("#api-filter").value.trim().toLowerCase();
+    $$(".api-op").forEach((el) => el.classList.toggle("hidden", !!v && !el.dataset.search.includes(v)));
+    $$(".api-tag").forEach((sec) => sec.classList.toggle("hidden", !$$(".api-op:not(.hidden)", sec).length));
+  };
+  $("#api-filter").addEventListener("input", filter);
+  $$("[data-tagjump]").forEach((a) => a.onclick = (e) => { e.preventDefault(); $(`#tag-${CSS.escape(a.dataset.tagjump)}`).scrollIntoView({ behavior: REDUCED_MOTION ? "auto" : "smooth" }); });
+  filter();
+}
+
 // ------------------------------------------------------------------ Interaktivität
 // Befehlspalette (Strg+K), Tastenkürzel, sortierbare Tabellen, Live-Benachrichtigungen zu Aufgaben,
 // Seitenübergänge und kleine Animationen. Alles läuft über setMain() → enhance().
@@ -2912,7 +3099,8 @@ const PAGES = [
   ["Vorlagen", "#/templates", "disk", true], ["Aufgaben", "#/tasks", "list", false], ["Audit-Protokoll", "#/audit", "shield", true],
   ["Einstellungen", "#/settings", "gear", true], ["Einstellungen: Branding & SEO", "#/settings/branding", "gear", true],
   ["Einstellungen: Updates", "#/settings/update", "download", true], ["Einstellungen: Backup-Speicher", "#/settings/backups", "gear", true],
-  ["Einstellungen: Gemeinsamer Speicher", "#/settings/storage", "disk", true], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", true],
+  ["Einstellungen: Gemeinsamer Speicher", "#/settings/storage", "disk", true],
+  ["REST-API: Dokumentation", "#/api-docs", "list", true], ["REST-API: Tokens & Einstellungen", "#/settings/api", "gear", true], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", true],
   ["Mein Konto", "#/account", "user", false],
 ];
 let paletteCache = { t: 0, items: [] };

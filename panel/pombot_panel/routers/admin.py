@@ -45,7 +45,8 @@ def get_settings(user: User = Depends(require_admin)):
 
 @router.put("/settings")
 def put_settings(body: dict, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    body = {k: v for k, v in body.items() if k not in ("panel_domain", "acme_enabled")}  # nur über /domain
+    # panel_domain/acme_enabled nur über /domain, api_enabled nur über /api/admin/api (nicht per Token änderbar)
+    body = {k: v for k, v in body.items() if k not in ("panel_domain", "acme_enabled", "api_enabled")}
     changed = runtime.save(db, body)
     audit(db, user, "settings-update", ", ".join(changed), client_ip(request))
     db.commit()

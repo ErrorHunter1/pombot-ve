@@ -59,6 +59,10 @@ def client_ip(request: Request) -> str:
 
 
 def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    auth = request.headers.get("authorization", "")
+    if auth[:7].lower() == "bearer ":
+        from .api_tokens import user_from_token
+        return user_from_token(request, db, auth[7:])  # REST-API mit Token
     uid = request.session.get("uid")
     user = db.get(User, uid) if uid else None
     if not user or not user.active:

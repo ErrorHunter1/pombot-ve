@@ -387,6 +387,23 @@ ip route show 192.0.2.10 | grep -q pbr0 && fail "Route wurde nicht entfernt"
 api GET /api/pools | json '[(p["name"], p["used"], p["size"]) for p in d]'
 end
 
+step "REST-API mit Token"
+curl -sk -H "Authorization: Bearer pbt_x" "$API/api/guests" | grep -q "deaktiviert" || fail "API hätte deaktiviert sein müssen"
+api PUT /api/admin/api '{"enabled":true}' | json 'd["enabled"]' | grep -q True || fail "API ließ sich nicht einschalten"
+RW="$(api POST /api/admin/api/tokens '{"name":"ci"}' | json 'd["token"]')"
+RO="$(api POST /api/admin/api/tokens '{"name":"ci-lesen","read_only":true}' | json 'd["token"]')"
+tapi() { curl -sk -H "Authorization: Bearer $1" -H "Content-Type: application/json" -X "$2" ${4:+-d "$4"} "$API$3"; }
+tapi "$RW" GET /api/me | json 'd["username"]' | grep -q admin || fail "Token-Anmeldung fehlgeschlagen"
+tapi "$RW" GET "/api/guests?all=true" | json 'len(d)'
+tapi "$RW" PATCH /api/me '{"ssh_keys":""}' | grep -q username || fail "Schreiben mit Token (ohne X-PomBot) fehlgeschlagen"
+tapi "$RO" POST /api/pools '{"name":"x","network":"198.51.100.0/28"}' | grep -q "nur lesen" || fail "Nur-Lesen-Token durfte schreiben"
+tapi "$RW" GET /api/admin/api | grep -q "nur im Panel" || fail "Token durfte Tokens verwalten"
+curl -sk -o /dev/null -w '%{http_code}' "$API/openapi.json" | grep -q 404 || fail "OpenAPI darf nicht öffentlich sein"
+api GET /api/admin/api/openapi.json | json 'len(d["paths"]), d["info"]["title"]'
+api PUT /api/admin/api '{"enabled":false}' >/dev/null
+tapi "$RW" GET /api/me | grep -q "deaktiviert" || fail "Ausgeschaltete API akzeptiert Tokens"
+end
+
 step "Branding & SEO"
 curl -sk "$API/robots.txt" | grep -q "Disallow: /" || fail "robots.txt sperrt nicht"
 api PUT /api/admin/branding '{"name":"CI Cloud","title":"CI Cloud Panel","description":"Test","keywords":"","indexing":false,"theme_color":"#224466"}' >/dev/null

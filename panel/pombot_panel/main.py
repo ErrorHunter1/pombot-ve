@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import apps, backup_targets, branding, cluster, heartbeat, runtime, scheduler, tasks, updates
+from . import api_tokens, apps, backup_targets, branding, cluster, heartbeat, runtime, scheduler, tasks, updates
 from .config import settings
 from .db import SessionLocal, migrate
 from .routers import admin, auth, extras, guests, nodes, pools, system, users
@@ -46,7 +46,9 @@ app = FastAPI(title="PomBot Panel", version=settings.version, lifespan=lifespan,
 async def csrf_and_headers(request: Request, call_next):
     # Schreibende API-Aufrufe müssen den Header X-PomBot tragen. Fremde Webseiten können diesen
     # Header ohne CORS-Freigabe nicht setzen – das verhindert CSRF.
-    if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
+    # Aufrufe mit API-Token (REST-API) brauchen das nicht: Ein Token kann eine fremde Seite nicht mitschicken.
+    bearer = request.headers.get("authorization", "")[:7].lower() == "bearer "
+    if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS") and not bearer:
         if request.headers.get("x-pombot") != "1":
             return JSONResponse({"detail": "CSRF-Schutz: Header fehlt"}, status_code=403)
     response = await call_next(request)
@@ -61,7 +63,7 @@ async def csrf_and_headers(request: Request, call_next):
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie="pombot_session",
                    max_age=7 * 24 * 3600, same_site="lax", https_only=settings.https)
 
-for r in (auth.router, admin.router, apps.router, branding.router, backup_targets.router, cluster.router, cluster.user_router, updates.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
+for r in (auth.router, admin.router, api_tokens.router, apps.router, branding.router, backup_targets.router, cluster.router, cluster.user_router, updates.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
     app.include_router(r)
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

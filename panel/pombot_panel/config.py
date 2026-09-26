@@ -28,7 +28,7 @@ def _int(name: str, default: int) -> int:
 
 
 class Settings:
-    version = "0.9.1"
+    version = "0.10.0"
     secret_key = os.environ.get("POMBOT_SECRET_KEY", "")
     db_url = os.environ.get("POMBOT_DB_URL", "sqlite:///./pombot-panel.db")
     base_url = os.environ.get("POMBOT_BASE_URL", "http://localhost:8443").rstrip("/")
@@ -71,6 +71,9 @@ class Settings:
     # Updates: alle x Stunden auf GitHub nach einer neuen Version sehen (0 = nie)
     update_check_hours = _int("POMBOT_UPDATE_CHECK_HOURS", 6)
     update_repo = os.environ.get("POMBOT_UPDATE_REPO", "ErrorHunter1/pombot-ve")
+
+    # REST-API mit Tokens (im Adminbereich ein-/ausschaltbar)
+    api_enabled = os.environ.get("POMBOT_API_ENABLED", "0") == "1"
 
     @property
     def https(self) -> bool:
