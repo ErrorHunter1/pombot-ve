@@ -132,8 +132,10 @@ async def update_nodes(force_node: int | None = None) -> None:
         if parse(settings.version) < parse(tag):
             return  # Panel ist noch nicht aktualisiert – das neue Panel übernimmt nach dem Neustart
         tag = f"v{settings.version}"
+        only = _get(db, "update.nodes_ids") if force_node is None else None
         nodes = [(n.id, n.name, n.status, _agent_version(n), AgentClient.for_node(n))
-                 for n in db.scalars(select(Node)) if force_node in (None, n.id)]
+                 for n in db.scalars(select(Node))
+                 if force_node in (None, n.id) and (only is None or n.id in only)]
     pending = False
     for node_id, name, status, version, client in nodes:
         state = _node_state.get(node_id, {})
@@ -171,6 +173,7 @@ async def update_nodes(force_node: int | None = None) -> None:
     if not pending and force_node is None:
         with session_scope() as db:
             _set(db, "update.nodes_tag", None)
+            _set(db, "update.nodes_ids", None)
 
 
 def _store_version(node_id: int, version: str) -> None:
@@ -206,6 +209,7 @@ def update_info(user: User = Depends(require_admin), db: Session = Depends(get_d
     for n in db.scalars(select(Node).order_by(Node.name)):
         v = _agent_version(n)
         nodes.append({"id": n.id, "name": n.name, "status": n.status, "agent_version": v or None,
+                      "local": n.host in LOCAL_HOSTS,
                       "outdated": bool(v) and newer(settings.version, v), **_node_state.get(n.id, {})})
     return {
         "current": settings.version, "repo": settings.update_repo,
@@ -214,6 +218,7 @@ def update_info(user: User = Depends(require_admin), db: Session = Depends(get_d
         "checked_at": datetime.fromtimestamp(checked, timezone.utc).isoformat() if checked else None,
         "error": _get(db, "update.error"), "helper": HELPER.exists(),
         "panel": _panel_status(), "nodes": nodes, "nodes_tag": _get(db, "update.nodes_tag"),
+        "nodes_ids": _get(db, "update.nodes_ids"),
     }
 
 
@@ -229,34 +234,69 @@ async def update_check(user: User = Depends(require_admin)):
 
 class StartBody(BaseModel):
     tag: str | None = Field(default=None, pattern=r"^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}$")
+    scope: str = Field(default="all", pattern="^(all|panel|nodes)$")  # beides | nur Panel | nur Nodes
+    node_ids: list[int] | None = None  # None = alle Nodes
+
+
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 @router.post("/start")
 async def update_start(request: Request, body: StartBody | None = None, user: User = Depends(require_admin)):
+    body = body or StartBody()
     with session_scope() as db:
         latest = _get(db, "update.latest")
-        tag = (body.tag if body else None) or (latest or {}).get("tag")
-        if not tag:
-            raise HTTPException(400, "Noch keine Version bekannt – bitte zuerst „Jetzt prüfen“")
-        panel_needed = newer(tag[1:], settings.version)
-        if panel_needed and not HELPER.exists():
+        tag = body.tag or (latest or {}).get("tag")
+        nodes = list(db.scalars(select(Node)))
+        ids = None if body.node_ids is None else sorted({i for i in body.node_ids if any(n.id == i for n in nodes)})
+        do_panel = body.scope in ("all", "panel")
+        do_nodes = body.scope in ("all", "nodes")
+        if do_nodes and ids == []:
+            if body.scope == "nodes":
+                raise HTTPException(400, "Bitte mindestens einen Node auswählen")
+            do_nodes = False
+        if do_panel:
+            if not tag:
+                raise HTTPException(400, "Noch keine Version bekannt – bitte zuerst „Jetzt prüfen“")
+            if not newer(tag[1:], settings.version):
+                if body.scope == "panel":
+                    raise HTTPException(400, f"Das Panel ist bereits auf v{settings.version}")
+                do_panel = False
+        if do_panel and not HELPER.exists():
             raise HTTPException(400, "Der Update-Dienst ist auf diesem Server nicht eingerichtet (ältere Installation). "
                                      "Bitte einmalig per Kommandozeile aktualisieren – danach geht es per Knopfdruck.")
-        if _panel_status().get("state") in ("queued", "running") and panel_needed:
+        if do_panel and _panel_status().get("state") in ("queued", "running"):
             raise HTTPException(409, "Es läuft bereits ein Update")
-        _set(db, "update.nodes_tag", tag)
-        audit(db, user, "update-start", f"{settings.version} -> {tag}", client_ip(request))
-    if panel_needed:
+        # Nodes bekommen immer die Version des Panels (nach dessen Update die neue)
+        node_tag = tag if do_panel else f"v{settings.version}"
+        if do_nodes:
+            _set(db, "update.nodes_tag", node_tag)
+            _set(db, "update.nodes_ids", ids)
+        elif body.scope == "panel":  # ausdrücklich nur das Panel: offene Node-Aufträge verwerfen
+            _set(db, "update.nodes_tag", None)
+            _set(db, "update.nodes_ids", None)
+        what = {"all": "Panel + Nodes", "panel": "nur Panel", "nodes": "nur Nodes"}[body.scope]
+        audit(db, user, "update-start", f"{what}: {settings.version} -> {tag if do_panel else node_tag}"
+              + (f", Nodes {ids}" if do_nodes and ids is not None else ""), client_ip(request))
+        # Agent auf dem Panel-Server nur mit aktualisieren, wenn dieser Node mit ausgewählt ist
+        local_ids = [n.id for n in nodes if n.host in LOCAL_HOSTS]
+        local_agent = do_nodes and (ids is None or any(i in ids for i in local_ids))
+    if not do_panel and not do_nodes:
+        raise HTTPException(400, "Nichts zu tun – Panel und ausgewählte Nodes sind aktuell")
+    if do_panel:
         REQUEST.parent.mkdir(parents=True, exist_ok=True)
         tmp = REQUEST.with_suffix(".tmp")
-        tmp.write_text(tag)
+        tmp.write_text(f"{tag} {'all' if local_agent else 'panel'}")
         tmp.replace(REQUEST)  # atomar, damit der Update-Dienst nie eine halbe Datei liest
-        return {"ok": True, "panel": True, "message": f"Update auf {tag} gestartet – das Panel startet gleich neu."}
+        msg = f"Update auf {tag} gestartet – das Panel startet gleich neu."
+        if do_nodes:
+            msg += " Danach folgen die Nodes."
+        return {"ok": True, "panel": True, "message": msg}
     _node_state.clear()
     job = asyncio.create_task(update_nodes())
     _jobs.add(job)
     job.add_done_callback(_jobs.discard)
-    return {"ok": True, "panel": False, "message": "Panel ist aktuell – Nodes werden aktualisiert."}
+    return {"ok": True, "panel": False, "message": f"Nodes werden auf {node_tag} aktualisiert."}
 
 
 @router.post("/nodes/{node_id}")

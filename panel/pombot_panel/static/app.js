@@ -69,6 +69,7 @@ const ICONS = {
   terminal: "M4 17l6-5-6-5M12 19h8",
   menu: "M3 6h18M3 12h18M3 18h18",
   download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+  search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3",
   moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
   gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
@@ -84,12 +85,13 @@ function brandHtml() {
     : `<span class="brand-logo">${esc((b.name || "P").trim().charAt(0).toUpperCase())}</span>${esc(b.name)}`;
 }
 
-function toast(msg, type = "") {
+function toast(msg, type = "", onClick = null) {
   const el = document.createElement("div");
-  el.className = `toast ${type}`;
+  el.className = `toast ${type}${onClick ? " clickable" : ""}`;
   el.textContent = msg;
+  if (onClick) { el.title = "Details anzeigen"; el.onclick = () => { el.remove(); onClick(); }; }
   $("#toasts").appendChild(el);
-  setTimeout(() => el.remove(), type === "bad" ? 7000 : 3500);
+  setTimeout(() => { el.classList.add("leaving"); setTimeout(() => el.remove(), 250); }, type === "bad" ? 8000 : onClick ? 6000 : 3500);
 }
 const fail = (e) => toast(e.message || String(e), "bad");
 
@@ -101,7 +103,7 @@ function guestBadge(g) {
   if (g.status === "busy") return badge("Beschäftigt", "info");
   if (g.status === "error") return badge("Fehler", "bad");
   return {
-    running: badge("Läuft", "good"), stopped: badge("Gestoppt"), paused: badge("Pausiert", "warn"),
+    running: badge("Läuft", "good live"), stopped: badge("Gestoppt"), paused: badge("Pausiert", "warn"),
     missing: badge("Nicht gefunden", "bad"), stopping: badge("Fährt herunter", "warn"),
   }[g.power] || badge("Unbekannt");
 }
@@ -235,6 +237,7 @@ function showSecret(title, intro, secret, extra = "") {
 
 /** Zeigt den Live-Log einer Aufgabe. Liefert ein Promise mit dem Endstatus. */
 function watchTask(taskId, title) {
+  (S.watching = S.watching || new Set()).add(+taskId);
   return new Promise((resolve) => {
     let stop = false;
     const m = modal({
@@ -278,6 +281,8 @@ function renderShell() {
       <button class="btn sm menu-btn" id="menu-btn" aria-label="Menü">${icon("menu")}</button>
       <a class="brand" href="#/dashboard">${brandHtml()}</a>
       <span class="spacer"></span>
+      <button class="btn sm search-btn" id="palette-btn" title="Schnellsuche (Strg+K)">${icon("search")}<span>Suchen …</span><kbd>Strg K</kbd></button>
+      <a class="btn sm hidden task-pill" id="task-pill" href="#/tasks" title="Laufende Aufgaben"><span class="spinner"></span><span class="pill-text"></span></a>
       <a class="btn sm hidden" id="update-btn" href="#/settings/update" title="Neue Version verfügbar">${icon("download")}<span></span></a>
       <a class="btn sm primary" href="#/create">${icon("plus")}<span>Server erstellen</span></a>
       <button class="btn sm" id="theme-btn" title="Hell/Dunkel umschalten" aria-label="Design umschalten">${icon("moon")}</button>
@@ -289,6 +294,8 @@ function renderShell() {
   </div>`;
   $("#logout-btn").onclick = async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); S.me = null; location.hash = "#/login"; };
   $("#menu-btn").onclick = () => $("#sidebar").classList.toggle("open");
+  $("#palette-btn").onclick = () => openPalette();
+  pollTasks();
   if (me.role === "admin") { refreshUpdateBadge(); setInterval(refreshUpdateBadge, 30 * 60 * 1000); }
   $("#theme-btn").onclick = () => {
     const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
@@ -347,7 +354,7 @@ function markActive() {
   });
 }
 
-function setMain(html) { const m = $("#main"); if (m) m.innerHTML = html; }
+function setMain(html) { const m = $("#main"); if (!m) return; m.innerHTML = html; enhance(m); }
 
 function pageHead(title, sub = "", actions = "") {
   return `<div class="page-head"><div class="grow"><h1>${title}</h1>${sub ? `<div class="sub">${sub}</div>` : ""}</div><div class="actions">${actions}</div></div>`;
@@ -406,7 +413,9 @@ async function route(silent = false) {
   if (!silent) {
     $("#sidebar").classList.remove("open");
     S.handlers = {};
-    setMain(`<div class="muted"><span class="spinner"></span> Lade …</div>`);
+    setMain(`<div class="skeleton"><div class="sk sk-title"></div><div class="sk sk-sub"></div>
+      <div class="sk-grid"><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div></div><div class="sk sk-block"></div></div>`);
+    S.enter = true;
     updateSidebar();
   } else if (Date.now() - S.lastSidebar > 15000) {
     updateSidebar();
@@ -536,6 +545,37 @@ async function viewGuests(params, m, silent, seq) {
   const filter = $("#guest-filter") ? $("#guest-filter").value : "";
   S.handlers.toggleAll = () => { S.showAll = !S.showAll; route(); };
   S.handlers.open = (ds) => { location.hash = `#/guest/${ds.id}`; };
+  if (!silent) S.bulk = new Set();
+  S.bulk = S.bulk || new Set();
+  const visibleIds = new Set(guests.map((g) => g.id));
+  [...S.bulk].forEach((id) => { if (!visibleIds.has(id)) S.bulk.delete(id); });
+  const bulkRun = async (action, label) => {
+    const ids = [...S.bulk];
+    if (!ids.length) return;
+    if (["stop", "reboot"].includes(action) && !(await confirmBox(`${plural(ids.length, "Server", "Server")} ${label.toLowerCase()}?`,
+      action === "stop" ? "Hartes Stoppen entspricht dem Ziehen des Steckers." : "Die Server werden neu gestartet.", { danger: action === "stop", ok: label }))) return;
+    const res = await Promise.allSettled(ids.map((id) => api(`/api/guests/${id}/action`, { method: "POST", body: { action } })));
+    const bad = res.filter((r) => r.status === "rejected");
+    toast(bad.length ? `${ids.length - bad.length} von ${ids.length} ok – ${bad[0].reason.message}` : `${label}: ${plural(ids.length, "Server", "Server")}`, bad.length ? "bad" : "good");
+    route(true);
+  };
+  S.handlers.bulkStart = () => bulkRun("start", "Starten");
+  S.handlers.bulkShutdown = () => bulkRun("shutdown", "Herunterfahren");
+  S.handlers.bulkReboot = () => bulkRun("reboot", "Neu starten");
+  S.handlers.bulkStop = () => bulkRun("stop", "Hart stoppen");
+  S.handlers.bulkClear = () => { S.bulk.clear(); route(true); };
+  S.handlers.bulkTag = () => formModal({
+    title: `Tag für ${plural(S.bulk.size, "Server", "Server")}`, submit: "Hinzufügen",
+    fields: `<label class="field"><span>Tag</span><input type="text" name="tag" placeholder="z. B. kunde-a" required></label>`,
+    onSubmit: async (d, mm) => {
+      const byId = Object.fromEntries(guests.map((g) => [g.id, g]));
+      await Promise.all([...S.bulk].map((id) => api(`/api/guests/${id}`, { method: "PATCH",
+        body: { tags: [...new Set([...(byId[id].tags || []), d.tag.trim()])] } })));
+      mm.close();
+      toast("Tag hinzugefügt", "good");
+      route(true);
+    },
+  });
   S.handlers.tagFilter = (ds) => { $("#guest-filter").value = `#${ds.tag}`; $("#guest-filter").dispatchEvent(new Event("input")); };
   const allTags = [...new Set(guests.flatMap((g) => g.tags || []))].sort();
   S.handlers.power = async (ds) => {
@@ -550,9 +590,10 @@ async function viewGuests(params, m, silent, seq) {
     <div class="card">
       <div class="card-head" style="flex-wrap:wrap;gap:8px"><input type="text" id="guest-filter" placeholder="Suchen nach Name, IP, VMID, Besitzer, #tag …" value="${esc(filter)}" style="max-width:360px">
         ${allTags.length ? `<div class="tag-bar">${allTags.map((t) => `<button class="tag" data-act="tagFilter" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div>` : ""}</div>
-      ${guests.length ? `<div class="table-wrap"><table><thead><tr><th>Status</th><th>VMID</th><th>Name</th><th>Typ</th><th>IP-Adresse</th><th>Node</th>${admin ? "<th>Besitzer</th>" : ""}<th>Ressourcen</th><th></th></tr></thead><tbody>
+      ${guests.length ? `<div class="table-wrap"><table><thead><tr><th class="no-sort sel-col"><input type="checkbox" id="bulk-all" title="Alle auswählen"></th><th>Status</th><th>VMID</th><th>Name</th><th>Typ</th><th>IP-Adresse</th><th>Node</th>${admin ? "<th>Besitzer</th>" : ""}<th>Ressourcen</th><th class="no-sort"></th></tr></thead><tbody>
         ${guests.map((g) => `<tr class="click" data-act="open" data-id="${g.id}" data-search="${esc([g.name, g.hostname, g.vmid, guestIPs(g), g.owner, g.node, g.app || "", ...(g.tags || []).map((t) => "#" + t)].join(" ").toLowerCase())}">
-          <td>${guestBadge(g)}</td><td class="mono">${g.vmid}</td><td><strong>${esc(g.name)}</strong>${g.protected ? ` <span title="Löschschutz aktiv" class="muted">🔒</span>` : ""}<div class="muted small">${esc(g.template || "")}${g.app ? ` · ${esc(g.app)}` : ""}</div>
+          <td class="sel-col"><input type="checkbox" data-bulk="${g.id}" ${S.bulk.has(g.id) ? "checked" : ""} aria-label="Auswählen"></td>
+          <td data-sort="${esc(g.power)}">${guestBadge(g)}</td><td class="mono">${g.vmid}</td><td><strong>${esc(g.name)}</strong>${g.protected ? ` <span title="Löschschutz aktiv" class="muted">🔒</span>` : ""}<div class="muted small">${esc(g.template || "")}${g.app ? ` · ${esc(g.app)}` : ""}</div>
             ${(g.tags || []).length ? `<div class="tag-row">${g.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</div>` : ""}</td>
           <td><span class="type-tag">${g.type === "kvm" ? "VM" : "CT"}</span></td><td class="mono">${esc(guestIPs(g))}</td><td>${esc(g.node || "–")}</td>
           ${admin ? `<td>${esc(g.owner)}</td>` : ""}
@@ -562,14 +603,50 @@ async function viewGuests(params, m, silent, seq) {
             : `<button class="btn sm" data-act="power" data-action="start" data-id="${g.id}" title="Starten">${icon("play")}</button>`) : ""}</td>
         </tr>`).join("")}</tbody></table></div>`
         : `<div class="empty">Keine Server vorhanden. <a href="#/create">Ersten Server erstellen</a></div>`}
-    </div>`);
+    </div>
+    <div class="bulk-bar ${S.bulk.size ? "show" : ""}" id="bulk-bar"><strong id="bulk-count">${plural(S.bulk.size, "Server", "Server")} ausgewählt</strong>
+      <button class="btn sm" data-act="bulkStart">${icon("play")}Starten</button>
+      <button class="btn sm" data-act="bulkShutdown">${icon("power")}Herunterfahren</button>
+      <button class="btn sm" data-act="bulkReboot">${icon("refresh")}Neu starten</button>
+      <button class="btn sm danger" data-act="bulkStop">${icon("stop")}Hart stoppen</button>
+      <button class="btn sm" data-act="bulkTag">#&nbsp;Tag</button>
+      <button class="btn sm" data-act="bulkClear" title="Auswahl aufheben">✕</button></div>`);
+  const syncBulk = () => {
+    $("#bulk-bar").classList.toggle("show", S.bulk.size > 0);
+    $("#bulk-count").textContent = `${plural(S.bulk.size, "Server", "Server")} ausgewählt`;
+    const all = $("#bulk-all");
+    if (all) {
+      const vis = $$("input[data-bulk]").filter((c) => !c.closest("tr").classList.contains("hidden"));
+      all.checked = vis.length > 0 && vis.every((c) => c.checked);
+      all.indeterminate = !all.checked && vis.some((c) => c.checked);
+    }
+  };
+  const table = $("#main table");
+  if (table) table.addEventListener("click", (e) => {
+    const cb = e.target.closest("input[data-bulk], #bulk-all, td.sel-col");
+    if (!cb) return;
+    e.stopPropagation();  // kein Öffnen des Servers beim Anklicken der Auswahl
+    if (e.target.id === "bulk-all") {
+      $$("input[data-bulk]").filter((c) => !c.closest("tr").classList.contains("hidden")).forEach((c) => {
+        c.checked = e.target.checked;
+        if (c.checked) S.bulk.add(+c.dataset.bulk); else S.bulk.delete(+c.dataset.bulk);
+      });
+    } else {
+      const box = e.target.matches("input[data-bulk]") ? e.target : $("input[data-bulk]", cb);
+      if (!box) return;
+      if (e.target !== box) box.checked = !box.checked;
+      if (box.checked) S.bulk.add(+box.dataset.bulk); else S.bulk.delete(+box.dataset.bulk);
+    }
+    syncBulk();
+  });
+  syncBulk();
   const apply = () => {
     const q = $("#guest-filter").value.trim().toLowerCase();
     $$("tr[data-search]").forEach((tr) => tr.classList.toggle("hidden", q && !tr.dataset.search.includes(q)));
   };
-  $("#guest-filter").addEventListener("input", apply);
+  $("#guest-filter").addEventListener("input", () => { apply(); syncBulk(); });
   apply();
-  return { live: !filter };
+  return { live: !filter && !S.bulk.size };
 }
 
 // ------------------------------------------------------------------ Serverdetails
@@ -1146,14 +1223,40 @@ async function settingsUpdate(head, silent, seq) {
     await api("/api/admin/update/check", { method: "POST" }).then(() => toast("Geprüft")).catch(fail);
     route(true);
   };
+  // Auswahl: was aktualisiert wird (Panel, Nodes oder beides) und welche Nodes
+  S.updScope = S.updScope || (d.available ? "all" : "nodes");
+  if (!d.available && S.updScope !== "nodes") S.updScope = "nodes";
+  S.updNodes = S.updNodes || new Set(d.nodes.filter((n) => n.outdated || !n.agent_version).map((n) => n.id));
+  const targetFor = (scope) => scope === "nodes" ? `v${d.current}` : latest ? latest.tag : "";
+  const describe = () => {
+    const nodes = d.nodes.filter((n) => S.updNodes.has(n.id));
+    const parts = [];
+    if (S.updScope !== "nodes") parts.push(`Panel → ${latest.tag}`);
+    if (S.updScope !== "panel") parts.push(nodes.length ? `${plural(nodes.length, "Node", "Nodes")} → ${targetFor(S.updScope)}` : "keine Nodes gewählt");
+    return parts.join(" · ");
+  };
+  const renderPlan = () => {
+    const box = $("#upd-plan");
+    if (!box) return;
+    $$("#upd-scope button").forEach((b) => b.classList.toggle("active", b.dataset.scope === S.updScope));
+    $("#upd-nodes").classList.toggle("hidden", S.updScope === "panel");
+    $("#upd-summary").textContent = describe();
+    const noNodes = S.updScope !== "panel" && !S.updNodes.size;
+    $("#upd-go").disabled = busy || (S.updScope !== "nodes" && !d.helper) || (S.updScope === "nodes" && noNodes);
+  };
+  S.handlers.updScope = (ds) => { S.updScope = ds.scope; renderPlan(); };
   S.handlers.updStart = async () => {
-    const onlyNodes = !d.available;
-    if (!(await confirmBox(onlyNodes ? "Nodes aktualisieren?" : `Auf ${latest.tag} aktualisieren?`,
-      onlyNodes ? "Alle veralteten Nodes werden auf die Version des Panels gebracht. Laufende Server sind nicht betroffen."
-        : "Das Update läuft im Hintergrund: Panel (und ein Node auf diesem Server) werden installiert, das Panel startet dabei kurz neu. Danach werden alle weiteren Nodes automatisch aktualisiert. Laufende VMs und Container laufen weiter.",
-      { ok: "Update starten" }))) return;
-    const r = await api("/api/admin/update/start", { method: "POST", body: {} });
+    const scope = S.updScope;
+    const ids = d.nodes.filter((n) => S.updNodes.has(n.id)).map((n) => n.id);
+    const text = {
+      all: "Das Panel wird installiert und startet kurz neu, danach aktualisieren sich die ausgewählten Nodes selbst (auch später, falls ein Node gerade offline ist).",
+      panel: "Nur das Panel wird aktualisiert und startet kurz neu. Nodes bleiben auf ihrer Version – du kannst sie später nachziehen.",
+      nodes: `Die ausgewählten Nodes werden auf die Version des Panels (v${d.current}) gebracht.`,
+    }[scope];
+    if (!(await confirmBox("Update starten?", `<strong>${esc(describe())}</strong><br><br>${text} Laufende VMs und Container laufen weiter.`, { ok: "Update starten" }))) return;
+    const r = await api("/api/admin/update/start", { method: "POST", body: { scope, node_ids: scope === "panel" ? null : ids } });
     S.updateWatch = r.panel;
+    S.updNodes = null;
     toast(r.message);
     route(true);
   };
@@ -1175,8 +1278,21 @@ async function settingsUpdate(head, silent, seq) {
       </dl>
       <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px">
         <button class="btn" data-act="updCheck">Jetzt prüfen</button>
-        ${d.available || outdated.length ? `<button class="btn primary" data-act="updStart" ${busy || (d.available && !d.helper) ? "disabled" : ""}>${d.available ? `Update auf ${esc(latest.tag)} starten` : "Veraltete Nodes aktualisieren"}</button>` : ""}
       </div>
+      ${d.available || outdated.length || d.nodes.length ? `<div id="upd-plan" class="upd-plan">
+        <div class="seg" id="upd-scope">
+          <button type="button" data-act="updScope" data-scope="all" ${d.available ? "" : "disabled"}>Panel + Nodes</button>
+          <button type="button" data-act="updScope" data-scope="panel" ${d.available ? "" : "disabled"}>Nur Panel</button>
+          <button type="button" data-act="updScope" data-scope="nodes" ${d.nodes.length ? "" : "disabled"}>Nur Nodes</button>
+        </div>
+        <div id="upd-nodes" class="upd-nodes">
+          ${d.nodes.map((n) => `<label class="check"><input type="checkbox" data-upd-node="${n.id}" ${S.updNodes.has(n.id) ? "checked" : ""}>
+            <span>${esc(n.name)}${n.local ? ` <span class="muted small">(dieser Server)</span>` : ""} <span class="mono small muted">${n.agent_version ? `v${esc(n.agent_version)}` : "?"}</span>
+            ${n.outdated ? badge("veraltet", "warn") : n.agent_version ? badge("aktuell", "good") : ""}${n.status !== "online" ? ` ${badge("offline", "bad")}` : ""}</span></label>`).join("")}
+          <div class="muted small">Nodes bekommen immer die Version des Panels. Offline-Nodes folgen, sobald sie wieder erreichbar sind.</div>
+        </div>
+        <div class="upd-go-row"><span class="small" id="upd-summary"></span><button class="btn primary" id="upd-go" data-act="updStart">Update starten</button></div>
+      </div>` : ""}
       ${d.available && !d.helper ? `<div class="alert warn" style="margin-top:12px">Diese Installation ist älter als die Update-Funktion. Einmalig per Kommandozeile aktualisieren – danach geht es per Knopfdruck:
         <pre class="mono small" style="white-space:pre-wrap;margin:8px 0 0">curl -fsSL https://raw.githubusercontent.com/${esc(d.repo)}/main/get.sh | sudo bash -s -- --no-domain</pre></div>` : ""}
     </div></div>
@@ -1199,6 +1315,11 @@ async function settingsUpdate(head, silent, seq) {
         <td>${n.state ? `${st(n.state)} <span class="small muted">${esc(n.message || "")}</span>` : ""}</td>
         <td class="right">${n.outdated && n.status === "online" ? `<button class="btn sm" data-act="updNode" data-id="${n.id}">Aktualisieren</button>` : ""}</td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Keine Nodes.</div>`}</div>`);
+  $$("[data-upd-node]").forEach((cb) => cb.onchange = () => {
+    if (cb.checked) S.updNodes.add(+cb.dataset.updNode); else S.updNodes.delete(+cb.dataset.updNode);
+    renderPlan();
+  });
+  renderPlan();
   $("#upd-form select").onchange = async (e) => {
     await api("/api/admin/settings", { method: "PUT", body: { update_check_hours: +e.target.value } })
       .then(() => toast("Gespeichert")).catch(fail);
@@ -2701,6 +2822,226 @@ async function viewAccount(params) {
     await api("/api/me", { method: "PATCH", body: { ssh_keys: e.target.ssh_keys.value } }).then(() => toast("Gespeichert")).catch(fail);
   };
 }
+
+// ------------------------------------------------------------------ Interaktivität
+// Befehlspalette (Strg+K), Tastenkürzel, sortierbare Tabellen, Live-Benachrichtigungen zu Aufgaben,
+// Seitenübergänge und kleine Animationen. Alles läuft über setMain() → enhance().
+
+const REDUCED_MOTION = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const COLLATOR = new Intl.Collator("de", { numeric: true, sensitivity: "base" });
+S.sort = S.sort || {};
+
+function enhance(root) {
+  if (S.enter) {
+    S.enter = false;
+    if (!REDUCED_MOTION) {
+      root.classList.remove("page-enter");
+      void root.offsetWidth;  // Animation neu starten
+      root.classList.add("page-enter");
+      $$(".stat .value", root).forEach(countUp);
+    }
+  }
+  $$("table", root).forEach((table, i) => makeSortable(table, `${location.hash.split("?")[0]}:${i}`));
+}
+
+// ---- Zahlen hochzählen (Dashboard-Kacheln)
+function countUp(el) {
+  const m = el.textContent.match(/^(\D*)(\d+)(.*)$/s);
+  if (!m || +m[2] < 2 || el.children.length) return;
+  const [, pre, num, post] = m, target = +num, t0 = performance.now(), dur = 600;
+  const step = (t) => {
+    const p = Math.min(1, (t - t0) / dur), eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = `${pre}${Math.round(target * eased)}${post}`;
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// ---- Tabellen per Klick auf die Überschrift sortieren (bleibt bei Live-Aktualisierung erhalten)
+const UNITS = { B: 1, KB: 1e3, KIB: 1024, MB: 1e6, MIB: 1048576, GB: 1e9, GIB: 1073741824, TB: 1e12, TIB: 1099511627776 };
+function sortKey(cell) {
+  const raw = (cell.dataset.sort ?? cell.innerText).trim();
+  const date = raw.match(/^(\d{2})\.(\d{2})\.(\d{4}),?\s*(\d{2}):(\d{2})/);
+  if (date) return { n: Date.UTC(date[3], date[2] - 1, date[1], date[4], date[5]) };
+  const size = raw.match(/^(-?\d+(?:[.,]\d+)?)\s*(B|KB|KiB|MB|MiB|GB|GiB|TB|TiB)\b/i);
+  if (size) return { n: parseFloat(size[1].replace(",", ".")) * UNITS[size[2].toUpperCase()] };
+  if (/^-?\d+(?:[.,]\d+)?\s*%?$/.test(raw)) return { n: parseFloat(raw.replace(",", ".")) };
+  return { s: raw };
+}
+function sortTable(table, col, dir) {
+  const body = table.tBodies[0];
+  if (!body) return;
+  const rows = [...body.rows];
+  if (rows.length < 2 || rows.some((r) => r.cells.length <= col)) return;
+  const keyed = rows.map((r) => [sortKey(r.cells[col]), r]);
+  keyed.sort(([a], [b]) => {
+    const c = (a.n !== undefined && b.n !== undefined) ? a.n - b.n : COLLATOR.compare(a.s ?? String(a.n), b.s ?? String(b.n));
+    return dir === "asc" ? c : -c;
+  });
+  keyed.forEach(([, r]) => body.appendChild(r));
+}
+function makeSortable(table, key) {
+  const head = table.tHead && table.tHead.rows[0];
+  if (!head || table.dataset.sortable === "0") return;
+  [...head.cells].forEach((th, col) => {
+    if (!th.textContent.trim() || th.classList.contains("no-sort")) return;
+    th.classList.add("sortable");
+    th.title = "Klicken zum Sortieren";
+    th.onclick = () => {
+      const cur = S.sort[key];
+      const dir = cur && cur.col === col && cur.dir === "asc" ? "desc" : "asc";
+      S.sort[key] = { col, dir };
+      applySort(table, head, key);
+    };
+  });
+  applySort(table, head, key);
+}
+function applySort(table, head, key) {
+  const st = S.sort[key];
+  [...head.cells].forEach((th, i) => {
+    th.classList.toggle("sorted-asc", !!st && st.col === i && st.dir === "asc");
+    th.classList.toggle("sorted-desc", !!st && st.col === i && st.dir === "desc");
+  });
+  if (st) sortTable(table, st.col, st.dir);
+}
+
+// ---- Befehlspalette
+const PAGES = [
+  ["Dashboard", "#/dashboard", "home", false], ["Server", "#/guests", "server", false], ["Server erstellen", "#/create", "plus", false],
+  ["Nodes", "#/nodes", "node", true], ["IP-Pools", "#/pools", "net", true], ["Benutzer", "#/users", "users", true],
+  ["Vorlagen", "#/templates", "disk", true], ["Aufgaben", "#/tasks", "list", false], ["Audit-Protokoll", "#/audit", "shield", true],
+  ["Einstellungen", "#/settings", "gear", true], ["Einstellungen: Branding & SEO", "#/settings/branding", "gear", true],
+  ["Einstellungen: Updates", "#/settings/update", "download", true], ["Einstellungen: Backup-Speicher", "#/settings/backups", "gear", true],
+  ["Einstellungen: Gemeinsamer Speicher", "#/settings/storage", "disk", true], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", true],
+  ["Mein Konto", "#/account", "user", false],
+];
+let paletteCache = { t: 0, items: [] };
+
+async function paletteItems() {
+  const admin = S.me && S.me.role === "admin";
+  const items = PAGES.filter(([, , , adm]) => admin || !adm).map(([label, href, ic]) => ({ label, sub: "Seite", href, icon: ic }));
+  items.push({ label: "Hell/Dunkel umschalten", sub: "Aktion", icon: "moon", run: () => $("#theme-btn") && $("#theme-btn").click() });
+  items.push({ label: "Tastenkürzel anzeigen", sub: "Hilfe", icon: "list", run: showShortcuts });
+  items.push({ label: "Abmelden", sub: "Aktion", icon: "logout", run: () => $("#logout-btn") && $("#logout-btn").click() });
+  if (Date.now() - paletteCache.t > 30000) {
+    const [guests, nodes] = await Promise.all([api(`/api/guests${admin ? "?all=true" : ""}`).catch(() => []), admin ? api("/api/nodes").catch(() => []) : []]);
+    paletteCache = {
+      t: Date.now(),
+      items: [
+        ...guests.map((g) => ({ label: g.name, sub: `Server #${g.vmid} · ${g.type === "kvm" ? "VM" : "Container"} · ${guestIPs(g) || "keine IP"}${g.app ? ` · ${g.app}` : ""}${(g.tags || []).map((t) => ` #${t}`).join("")}`,
+          href: `#/guest/${g.id}`, icon: "server", state: g.power })),
+        ...nodes.map((n) => ({ label: n.name, sub: `Node · ${n.status}`, href: `#/node/${n.id}`, icon: "node" })),
+      ],
+    };
+  }
+  return [...items, ...paletteCache.items];
+}
+
+async function openPalette() {
+  if ($(".palette-back") || !S.me) return;
+  const back = document.createElement("div");
+  back.className = "palette-back";
+  back.innerHTML = `<div class="palette" role="dialog" aria-label="Schnellsuche">
+    <div class="palette-input">${icon("search")}<input type="text" placeholder="Server, Seite oder Aktion suchen …" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
+    <div class="palette-list"><div class="muted small" style="padding:14px">Lade …</div></div>
+    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> auswählen</span><span><kbd>Enter</kbd> öffnen</span><span><kbd>Strg</kbd><kbd>K</kbd> Schnellsuche</span></div></div>`;
+  document.body.appendChild(back);
+  const input = $("input", back), list = $(".palette-list", back);
+  let items = [], shown = [], sel = 0;
+  const close = () => back.remove();
+  const go = (it) => { close(); if (it.run) it.run(); else location.hash = it.href; };
+  const render = () => {
+    const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+    shown = items.filter((it) => words.every((w) => `${it.label} ${it.sub}`.toLowerCase().includes(w))).slice(0, 60);
+    sel = Math.min(sel, Math.max(0, shown.length - 1));
+    list.innerHTML = shown.length ? shown.map((it, i) => `<div class="palette-item ${i === sel ? "sel" : ""}" data-i="${i}">
+        <span class="pi-icon">${icon(it.icon || "list")}</span><span class="pi-text"><span class="pi-label">${esc(it.label)}</span><span class="pi-sub">${esc(it.sub)}</span></span>
+        ${it.state === "running" ? `<span class="dot live" title="läuft"></span>` : ""}</div>`).join("")
+      : `<div class="muted small" style="padding:14px">Nichts gefunden.</div>`;
+    const cur = $(".palette-item.sel", list);
+    if (cur) cur.scrollIntoView({ block: "nearest" });
+  };
+  back.addEventListener("mousedown", (e) => { if (e.target === back) close(); });
+  list.addEventListener("click", (e) => { const el = e.target.closest(".palette-item"); if (el) go(shown[+el.dataset.i]); });
+  list.addEventListener("mousemove", (e) => {
+    const el = e.target.closest(".palette-item");
+    if (el && +el.dataset.i !== sel) { sel = +el.dataset.i; $$(".palette-item", list).forEach((x, i) => x.classList.toggle("sel", i === sel)); }
+  });
+  input.addEventListener("input", () => { sel = 0; render(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(sel + 1, shown.length - 1); render(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(sel - 1, 0); render(); }
+    else if (e.key === "Enter" && shown[sel]) { e.preventDefault(); go(shown[sel]); }
+    else if (e.key === "Escape") { e.preventDefault(); close(); }
+  });
+  input.focus();
+  items = await paletteItems();
+  render();
+}
+
+// ---- Tastenkürzel
+const SHORTCUTS = [
+  ["Strg + K", "Schnellsuche (Server, Seiten, Aktionen)"], ["/", "Suchfeld der Seite"], ["c", "Server erstellen"],
+  ["g d", "Dashboard"], ["g s", "Server"], ["g n", "Nodes"], ["g t", "Aufgaben"], ["g e", "Einstellungen"], ["g a", "Mein Konto"],
+  ["?", "Diese Übersicht"],
+];
+function showShortcuts() {
+  modal({ title: "Tastenkürzel", body: `<div class="shortcut-list">${SHORTCUTS.map(([k, t]) =>
+    `<div><span>${k.split(" ").map((x) => x === "+" ? " + " : `<kbd>${esc(x)}</kbd>`).join("")}</span><span>${esc(t)}</span></div>`).join("")}</div>`,
+  foot: `<button class="btn" data-close>Schließen</button>` });
+}
+let pendingG = 0;
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
+  if (!S.me || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (/INPUT|TEXTAREA|SELECT/.test(t.tagName) || t.isContentEditable)) return;
+  if ($(".modal-back") || $(".palette-back")) return;
+  const admin = S.me.role === "admin";
+  if (Date.now() - pendingG < 1200) {
+    pendingG = 0;
+    const target = { d: "#/dashboard", s: "#/guests", n: admin && "#/nodes", t: "#/tasks", e: admin && "#/settings", a: "#/account", p: admin && "#/pools", u: admin && "#/users" }[e.key];
+    if (target) { e.preventDefault(); location.hash = target; }
+    return;
+  }
+  if (e.key === "g") { pendingG = Date.now(); return; }
+  if (e.key === "/") {
+    const search = $("#main input[type=text][id$='filter'], #main input[type=search]") || $("#main .card-head input[type=text]");
+    if (search) { e.preventDefault(); search.focus(); search.select(); }
+    return;
+  }
+  if (e.key === "c") { e.preventDefault(); location.hash = "#/create"; return; }
+  if (e.key === "?") { e.preventDefault(); showShortcuts(); }
+});
+
+// ---- Live-Benachrichtigungen, wenn Aufgaben fertig werden (+ Anzeige laufender Aufgaben)
+S.taskSeen = null;
+S.watching = S.watching || new Set();
+async function pollTasks() {
+  if (!S.me || document.hidden) return;
+  let list;
+  try { list = await api("/api/tasks?limit=20"); } catch (e) { return; }
+  const running = list.filter((t) => t.status === "running");
+  const pill = $("#task-pill");
+  if (pill) {
+    pill.classList.toggle("hidden", !running.length);
+    $(".pill-text", pill).textContent = running.length === 1 ? `${TASK_LABELS[running[0].action] || running[0].action}: ${running[0].target}` : `${running.length} Aufgaben laufen`;
+  }
+  if (S.taskSeen === null) { S.taskSeen = new Map(list.map((t) => [t.id, t.status])); return; }
+  for (const t of list.slice().reverse()) {
+    const before = S.taskSeen.get(t.id);
+    S.taskSeen.set(t.id, t.status);
+    if (t.status === "running" || before === t.status || S.watching.has(t.id)) continue;
+    if (before === undefined && Date.now() - Date.parse(t.finished_at || t.started_at) > 60000) continue;
+    const mine = t.user_id === S.me.id || t.user_id === null;
+    if (!mine && t.status !== "error") continue;
+    const label = `${TASK_LABELS[t.action] || t.action}: ${t.target}`;
+    toast(t.status === "ok" ? `✓ ${label} – fertig` : `✕ ${label} – fehlgeschlagen`, t.status === "ok" ? "good" : "bad",
+      () => watchTask(t.id, label));
+    if (S.live && !$(".modal-back")) route(true);
+  }
+}
+setInterval(pollTasks, 5000);
 
 // ------------------------------------------------------------------ Start
 

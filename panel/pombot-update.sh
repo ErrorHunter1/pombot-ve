@@ -24,13 +24,14 @@ status() {  # status <state> <message> [tag]
 
 # Auftrag lesen und sofort entfernen (sonst startet die Path-Unit erneut)
 [ -f "$REQUEST" ] && [ ! -L "$REQUEST" ] || exit 0
-TAG="$(head -c 64 "$REQUEST" | tr -d '[:space:]')"
+read -r TAG SCOPE _ < <(head -c 80 "$REQUEST" | tr -cd 'A-Za-z0-9. \n' | head -n1) || true
 rm -f "$REQUEST"
+[ "${SCOPE:-all}" = "panel" ] || SCOPE=all
 
 : > "$LOG"
 chmod 644 "$LOG"
 exec >>"$LOG" 2>&1
-echo "$(date '+%F %T') Update auf $TAG angefordert (Quelle: github.com/$REPO)"
+echo "$(date '+%F %T') Update auf $TAG angefordert ($([ "$SCOPE" = panel ] && echo "nur Panel" || echo "Panel + Agent auf diesem Server"), Quelle: github.com/$REPO)"
 
 if ! [[ "$TAG" =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}$ ]]; then
   echo "Ungültige Version: $TAG"
@@ -50,7 +51,7 @@ trap 'rm -rf "$TMP"' EXIT
 status running "Lade Pakete herunter …"
 
 PKGS=(pombot-panel)
-dpkg -s pombot-agent >/dev/null 2>&1 && PKGS+=(pombot-agent)
+if [ "$SCOPE" = "all" ] && dpkg -s pombot-agent >/dev/null 2>&1; then PKGS+=(pombot-agent); fi
 FILES=()
 for pkg in "${PKGS[@]}"; do
   url="https://github.com/$REPO/releases/download/$TAG/${pkg}_${VER}_all.deb"

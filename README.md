@@ -60,9 +60,10 @@ Nodes brauchen einen echten Server oder eine VM mit (verschachtelter) Virtualisi
 Container installiert der Installer automatisch nur das Panel.
 
 **Update:** Das Panel sieht regelmäßig (Standard: alle 6 Stunden, einstellbar) auf GitHub nach neuen Versionen.
-Ist eine da, erscheint oben ein Hinweis; unter *Einstellungen → Updates* startet ein Klick das Update im
-Hintergrund: Panel (und ein Node auf demselben Server) werden installiert, danach aktualisieren sich alle
-weiteren Nodes selbst – auch Nodes, die gerade offline sind, sobald sie wieder erreichbar sind. Laufende VMs und
+Ist eine da, erscheint oben ein Hinweis; unter *Einstellungen → Updates* wählst du **Panel + Nodes**,
+**nur Panel** oder **nur Nodes** (einzelne Nodes an- oder abwählbar) und startest das Update im Hintergrund.
+Nodes bekommen immer die Version des Panels und aktualisieren sich selbst – auch Nodes, die gerade offline
+sind, sobald sie wieder erreichbar sind. Laufende VMs und
 Container laufen dabei weiter. Einstellungen, Server und Daten bleiben erhalten.
 Installationen vor 0.8.0 einmalig mit demselben Befehl wie oben aktualisieren, danach geht es per Knopfdruck.
 
@@ -209,6 +210,10 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
 - **Neu installieren** mit gleicher IP, **root-Passwort zurücksetzen**
 - **Benutzer:** Admin/Benutzer, Kontingente (Server, CPU, RAM, Speicher, IPs), Freischaltung, lokale Konten
 - **Aufgaben** mit Live-Log, **Audit-Protokoll** aller Aktionen
+- **Bedienung:** Schnellsuche mit <kbd>Strg</kbd>+<kbd>K</kbd> (Server, Nodes, Seiten, Aktionen), Tastenkürzel
+  (<kbd>/</kbd> Suchen, <kbd>c</kbd> Server erstellen, <kbd>g</kbd> <kbd>s</kbd> Server …, <kbd>?</kbd> Übersicht), sortierbare
+  Tabellen, Mehrfachauswahl in der Serverliste (Starten, Herunterfahren, Neustarten, Stoppen, Tags für mehrere
+  Server), Live-Benachrichtigungen, wenn Aufgaben fertig werden, Anzeige laufender Aufgaben in der Kopfleiste
 - Hell-/Dunkelmodus, auch auf dem Handy nutzbar
 
 In Arbeit: Live-Migration ohne Unterbrechung (bei direkt verbundenen Nodes).
