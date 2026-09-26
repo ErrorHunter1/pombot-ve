@@ -59,7 +59,12 @@ curl -fsSL https://raw.githubusercontent.com/ErrorHunter1/pombot-ve/main/get.sh 
 Nodes brauchen einen echten Server oder eine VM mit (verschachtelter) Virtualisierung – in einem
 Container installiert der Installer automatisch nur das Panel.
 
-**Update:** denselben Befehl erneut ausführen. Einstellungen, Server und Daten bleiben erhalten.
+**Update:** Das Panel sieht regelmäßig (Standard: alle 6 Stunden, einstellbar) auf GitHub nach neuen Versionen.
+Ist eine da, erscheint oben ein Hinweis; unter *Einstellungen → Updates* startet ein Klick das Update im
+Hintergrund: Panel (und ein Node auf demselben Server) werden installiert, danach aktualisieren sich alle
+weiteren Nodes selbst – auch Nodes, die gerade offline sind, sobald sie wieder erreichbar sind. Laufende VMs und
+Container laufen dabei weiter. Einstellungen, Server und Daten bleiben erhalten.
+Installationen vor 0.8.0 einmalig mit demselben Befehl wie oben aktualisieren, danach geht es per Knopfdruck.
 
 **Firewall:** Panel-Port `8443/tcp` öffnen (bzw. `443` mit eigener Domain). Nodes brauchen Port
 `8007/tcp` nur für die IP des Panels.

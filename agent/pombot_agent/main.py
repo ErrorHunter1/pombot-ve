@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, ha, host, images, isos, kvm, lxc, migrate, remote, routed, storage
+from . import console, firewall, ha, host, images, isos, kvm, lxc, migrate, remote, routed, selfupdate, storage
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -110,6 +110,21 @@ def health():
 @app.get("/host/info", dependencies=[Depends(auth)])
 def host_info():
     return host.info()
+
+
+class UpdateBody(BaseModel):
+    tag: str = Field(pattern=r"^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}$")
+
+
+@app.post("/system/update", dependencies=[Depends(auth)])
+def system_update(body: UpdateBody):
+    """Agent aktualisiert sich selbst auf die angegebene Version (läuft im Hintergrund weiter)."""
+    return selfupdate.start(body.tag)
+
+
+@app.get("/system/update", dependencies=[Depends(auth)])
+def system_update_status():
+    return {**selfupdate.status(), "version": VERSION}
 
 
 @app.get("/host/network", dependencies=[Depends(auth)])

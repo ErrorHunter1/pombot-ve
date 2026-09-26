@@ -47,7 +47,8 @@ apt-get install -y -qq --no-install-recommends python3 python3-venv openssl curl
 log "Kopiere Dateien nach /opt/pombot …"
 rm -rf /opt/pombot/panel/pombot_panel /opt/pombot/agent-src
 mkdir -p /opt/pombot/panel
-cp -r "$HERE/panel/pombot_panel" "$HERE/panel/requirements.txt" "$HERE/panel/setup-panel.sh" /opt/pombot/panel/
+cp -r "$HERE/panel/pombot_panel" "$HERE/panel/requirements.txt" "$HERE/panel/setup-panel.sh" \
+  "$HERE/panel/pombot-update.sh" "$HERE/panel/pombot-update.service" "$HERE/panel/pombot-update.path" /opt/pombot/panel/
 cp -r "$HERE/agent" /opt/pombot/agent-src
 find /opt/pombot -name __pycache__ -prune -exec rm -rf {} +
 install -m 644 "$HERE/panel/pombot-panel.service" /etc/systemd/system/pombot-panel.service

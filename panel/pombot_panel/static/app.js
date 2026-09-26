@@ -68,6 +68,7 @@ const ICONS = {
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6",
   terminal: "M4 17l6-5-6-5M12 19h8",
   menu: "M3 6h18M3 12h18M3 18h18",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
   moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
   gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
@@ -271,6 +272,7 @@ function renderShell() {
       <button class="btn sm menu-btn" id="menu-btn" aria-label="Menü">${icon("menu")}</button>
       <a class="brand" href="#/dashboard"><span class="brand-logo">P</span>PomBot VE</a>
       <span class="spacer"></span>
+      <a class="btn sm hidden" id="update-btn" href="#/settings/update" title="Neue Version verfügbar">${icon("download")}<span></span></a>
       <a class="btn sm primary" href="#/create">${icon("plus")}<span>Server erstellen</span></a>
       <button class="btn sm" id="theme-btn" title="Hell/Dunkel umschalten" aria-label="Design umschalten">${icon("moon")}</button>
       <a class="user-chip" href="#/account"><span class="avatar">${me.avatar_url ? `<img src="${esc(me.avatar_url)}" alt="">` : initials}</span><span class="uname">${esc(me.username)}</span></a>
@@ -281,6 +283,7 @@ function renderShell() {
   </div>`;
   $("#logout-btn").onclick = async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); S.me = null; location.hash = "#/login"; };
   $("#menu-btn").onclick = () => $("#sidebar").classList.toggle("open");
+  if (me.role === "admin") { refreshUpdateBadge(); setInterval(refreshUpdateBadge, 30 * 60 * 1000); }
   $("#theme-btn").onclick = () => {
     const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
     const next = dark ? "light" : "dark";
@@ -979,6 +982,115 @@ async function settingsBackupTargets(head) {
           <button class="btn sm danger" data-act="tgtDelete" data-id="${t.id}">Entfernen</button></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Noch kein externer Speicher. Backups liegen bisher nur lokal auf den Nodes – fällt ein Node aus, sind sie weg.<br><br>
       Unterstützt: SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2, Wasabi, MinIO), NFS und SMB.</div>`}</div>`);
+}
+
+// ------------------------------------------------------------------ Updates (Einstellungen)
+
+async function refreshUpdateBadge(data) {
+  const btn = $("#update-btn");
+  if (!btn) return;
+  try { data = data || await api("/api/admin/update"); } catch (e) { return; }
+  const outdated = data.nodes.filter((n) => n.outdated).length;
+  const text = data.available ? `Update ${data.latest.tag}` : outdated ? `${outdated} Node${outdated > 1 ? "s" : ""} veraltet` : "";
+  btn.classList.toggle("hidden", !text);
+  $("span", btn).textContent = text;
+}
+
+const UPDATE_STATE = {
+  idle: ["–", ""], queued: ["Wartet", "info"], running: ["Läuft", "info"], ok: ["Erfolgreich", "good"], error: ["Fehler", "bad"],
+  requested: ["Gestartet", "info"], manual: ["Manuell nötig", "warn"],
+};
+
+async function settingsUpdate(head, silent, seq) {
+  let d;
+  try {
+    d = await api("/api/admin/update");
+  } catch (e) {
+    // Panel startet während des Updates neu – einfach weiter abfragen
+    if (S.updateWatch) {
+      setMain(head + `<div class="card"><div class="card-body"><span class="spinner"></span> Panel startet nach dem Update neu … die Seite lädt automatisch weiter.</div></div>`);
+      return { live: true };
+    }
+    throw e;
+  }
+  if (isStale(seq)) return;
+  if (S.updateWatch && d.current !== S.cfg.version) {
+    toast(`Panel wurde auf v${d.current} aktualisiert`);
+    S.updateWatch = false;
+    setTimeout(() => location.reload(), 1200);  // neue Oberfläche laden
+  }
+  refreshUpdateBadge(d);
+  const p = d.panel || {};
+  const busy = ["queued", "running"].includes(p.state);
+  if (busy) S.updateWatch = true;
+  const nodesBusy = d.nodes.some((n) => ["requested", "running"].includes(n.state));
+  const st = (k) => { const [t, c] = UPDATE_STATE[k] || [k, ""]; return badge(t, c); };
+  const latest = d.latest;
+
+  S.handlers.updCheck = async (ds, el) => {
+    el.disabled = true;
+    el.innerHTML = `<span class="spinner"></span> Prüfe …`;
+    await api("/api/admin/update/check", { method: "POST" }).then(() => toast("Geprüft")).catch(fail);
+    route(true);
+  };
+  S.handlers.updStart = async () => {
+    const onlyNodes = !d.available;
+    if (!(await confirmBox(onlyNodes ? "Nodes aktualisieren?" : `Auf ${latest.tag} aktualisieren?`,
+      onlyNodes ? "Alle veralteten Nodes werden auf die Version des Panels gebracht. Laufende Server sind nicht betroffen."
+        : "Das Update läuft im Hintergrund: Panel (und ein Node auf diesem Server) werden installiert, das Panel startet dabei kurz neu. Danach werden alle weiteren Nodes automatisch aktualisiert. Laufende VMs und Container laufen weiter.",
+      { ok: "Update starten" }))) return;
+    const r = await api("/api/admin/update/start", { method: "POST", body: {} });
+    S.updateWatch = r.panel;
+    toast(r.message);
+    route(true);
+  };
+  S.handlers.updNode = async (ds, el) => {
+    el.disabled = true;
+    const r = await api(`/api/admin/update/nodes/${ds.id}`, { method: "POST" });
+    toast(r.message || "Gestartet");
+    route(true);
+  };
+
+  const outdated = d.nodes.filter((n) => n.outdated);
+  setMain(head + `<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>PomBot VE</h2>${d.available ? badge("Update verfügbar", "warn") : latest ? badge("Aktuell", "good") : ""}</div><div class="card-body">
+      <dl class="kv">
+        <dt>Installiert</dt><dd class="mono">v${esc(d.current)}</dd>
+        <dt>Neueste Version</dt><dd>${latest ? `<span class="mono">${esc(latest.tag)}</span>${latest.published_at ? ` <span class="muted small">vom ${fmtDate(latest.published_at)}</span>` : ""}${latest.url ? ` · <a href="${esc(latest.url)}" target="_blank" rel="noopener">Release ansehen</a>` : ""}` : `<span class="muted">noch nicht geprüft</span>`}</dd>
+        <dt>Zuletzt geprüft</dt><dd>${d.checked_at ? fmtDate(d.checked_at) : "–"}${d.error ? ` <span class="small" style="color:var(--bad)">(${esc(d.error)})</span>` : ""}</dd>
+        <dt>Quelle</dt><dd class="small"><a href="https://github.com/${esc(d.repo)}/releases" target="_blank" rel="noopener">github.com/${esc(d.repo)}</a></dd>
+      </dl>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button class="btn" data-act="updCheck">Jetzt prüfen</button>
+        ${d.available || outdated.length ? `<button class="btn primary" data-act="updStart" ${busy || (d.available && !d.helper) ? "disabled" : ""}>${d.available ? `Update auf ${esc(latest.tag)} starten` : "Veraltete Nodes aktualisieren"}</button>` : ""}
+      </div>
+      ${d.available && !d.helper ? `<div class="alert warn" style="margin-top:12px">Diese Installation ist älter als die Update-Funktion. Einmalig per Kommandozeile aktualisieren – danach geht es per Knopfdruck:
+        <pre class="mono small" style="white-space:pre-wrap;margin:8px 0 0">curl -fsSL https://raw.githubusercontent.com/${esc(d.repo)}/main/get.sh | sudo bash -s -- --no-domain</pre></div>` : ""}
+    </div></div>
+    <div class="card"><div class="card-head"><h2>Automatisch prüfen</h2></div><div class="card-body">
+      <form id="upd-form">
+        <label class="field"><span>Nach neuen Versionen sehen</span><select name="update_check_hours">
+          ${[[0, "Nie"], [1, "Jede Stunde"], [3, "Alle 3 Stunden"], [6, "Alle 6 Stunden"], [12, "Alle 12 Stunden"], [24, "Einmal am Tag"], [168, "Einmal pro Woche"]]
+            .map(([h, l]) => `<option value="${h}" ${h === d.check_hours ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <p class="muted small" style="margin-top:0">Geprüft wird nur – installiert wird erst, wenn du auf „Update starten“ klickst. Admins sehen neue Versionen oben in der Leiste.</p>
+      </form>
+    </div></div>
+  </div>
+  ${p.state && p.state !== "idle" ? `<div class="card" style="margin-top:16px"><div class="card-head"><h2>Update des Panels</h2>${st(p.state)}${p.tag ? ` <span class="mono small muted">${esc(p.tag)}</span>` : ""}</div><div class="card-body">
+    ${p.message ? `<p style="margin-top:0">${busy ? `<span class="spinner"></span> ` : ""}${esc(p.message)}</p>` : ""}
+    ${p.log && p.log.length ? `<pre class="mono small" style="max-height:280px;overflow:auto;white-space:pre-wrap;margin:0">${esc(p.log.join("\n"))}</pre>` : ""}</div></div>` : ""}
+  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Nodes</h2>${d.nodes_tag ? `<span class="small muted">werden auf ${esc(d.nodes_tag)} gebracht</span>` : ""}</div>
+    ${d.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>Node</th><th>Status</th><th>Agent-Version</th><th>Update</th><th></th></tr></thead><tbody>
+      ${d.nodes.map((n) => `<tr><td><strong>${esc(n.name)}</strong></td><td>${n.status === "online" ? badge("online", "good") : badge(n.status, "bad")}</td>
+        <td class="mono">${n.agent_version ? `v${esc(n.agent_version)}` : "–"} ${n.outdated ? badge("veraltet", "warn") : n.agent_version ? badge("aktuell", "good") : ""}</td>
+        <td>${n.state ? `${st(n.state)} <span class="small muted">${esc(n.message || "")}</span>` : ""}</td>
+        <td class="right">${n.outdated && n.status === "online" ? `<button class="btn sm" data-act="updNode" data-id="${n.id}">Aktualisieren</button>` : ""}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">Keine Nodes.</div>`}</div>`);
+  $("#upd-form select").onchange = async (e) => {
+    await api("/api/admin/settings", { method: "PUT", body: { update_check_hours: +e.target.value } })
+      .then(() => toast("Gespeichert")).catch(fail);
+  };
+  return { live: busy || nodesBusy || !!S.updateWatch };
 }
 
 // ------------------------------------------------------------------ Gemeinsamer Speicher (Einstellungen)
@@ -2105,12 +2217,13 @@ async function viewTemplates() {
 
 // ------------------------------------------------------------------ Adminbereich: Einstellungen
 
-async function viewSettings(params, m) {
+async function viewSettings(params, m, silent, seq) {
   const tab = m[1] || "general";
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"]]);
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["update", "Updates"]]);
   if (tab === "cloudflare") return settingsCloudflare(head);
+  if (tab === "update") return settingsUpdate(head, silent, seq);
   if (tab === "backups") return settingsBackupTargets(head);
   if (tab === "storage") return settingsStorages(head);
   if (tab === "domain") return settingsDomain(head);

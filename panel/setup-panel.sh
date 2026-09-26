@@ -99,8 +99,18 @@ else
   rm -f "$DROPIN"
 fi
 
+# Updates aus dem Panel: das Panel legt einen Auftrag ab, pombot-update.path startet das Update als root
+mkdir -p /var/lib/pombot-panel/update
+chown pombot:pombot /var/lib/pombot-panel/update
+chmod 750 /var/lib/pombot-panel/update
+if [ -f /opt/pombot/panel/pombot-update.sh ]; then
+  install -m 644 /opt/pombot/panel/pombot-update.service /etc/systemd/system/pombot-update.service
+  install -m 644 /opt/pombot/panel/pombot-update.path /etc/systemd/system/pombot-update.path
+fi
+
 log "Starte Dienst pombot-panel …"
 systemctl daemon-reload
+[ -f /etc/systemd/system/pombot-update.path ] && systemctl enable --now pombot-update.path >/dev/null 2>&1 || true
 systemctl enable pombot-panel >/dev/null 2>&1
 systemctl restart pombot-panel
 

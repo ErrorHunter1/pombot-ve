@@ -1,0 +1,9 @@
+[Unit]
+Description=PomBot VE Update-Auftrag vom Panel überwachen
+
+[Path]
+PathExists=/var/lib/pombot-panel/update/request
+Unit=pombot-update.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=PomBot VE Update (vom Panel angefordert)
+# Nicht an pombot-panel koppeln: das Update startet das Panel neu und darf dabei nicht mit beendet werden
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/pombot/panel/pombot-update.sh
+TimeoutStartSec=1h

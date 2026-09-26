@@ -359,4 +359,43 @@ ip route show 192.0.2.10 | grep -q pbr0 && fail "Route wurde nicht entfernt"
 api GET /api/pools | json '[(p["name"], p["used"], p["size"]) for p in d]'
 end
 
+step "Updates: Prüfung über die API"
+systemctl is-enabled pombot-update.path | grep -q enabled || fail "pombot-update.path ist nicht aktiviert"
+UPD="$(api POST /api/admin/update/check)"
+echo "$UPD" | json '{k: d[k] for k in ("current", "latest", "available", "helper", "check_hours")}'
+echo "$UPD" | json 'd["helper"]' | grep -q True || fail "Update-Dienst wird vom Panel nicht erkannt"
+TARGET="$(echo "$UPD" | json 'd["latest"]["tag"]')"
+[ -n "$TARGET" ] || fail "Neueste Version konnte nicht ermittelt werden"
+echo "Testziel (letztes veröffentlichtes Release): $TARGET"
+end
+
+step "Updates: Agent aktualisiert sich selbst (Testziel $TARGET)"
+TOKEN="$(sudo grep '^POMBOT_AGENT_TOKEN=' /etc/pombot/agent.env | cut -d= -f2-)"
+agent POST /system/update "{\"tag\":\"$TARGET\"}" | tee /dev/stderr | grep -q '"ok":true' || fail "Agent-Update ließ sich nicht starten"
+for i in $(seq 1 60); do
+  STATE="$(sudo cat /var/log/pombot-agent-update.json 2>/dev/null | json 'd["state"]' 2>/dev/null || true)"
+  [ "$STATE" = "ok" ] || [ "$STATE" = "error" ] && break
+  sleep 5
+done
+sudo cat /var/log/pombot-agent-update.log | tail -15
+[ "$STATE" = "ok" ] || fail "Agent-Update endete mit '$STATE'"
+dpkg -s pombot-agent | grep "^Version: ${TARGET#v}$" || fail "pombot-agent hat nicht die Version ${TARGET#v}"
+end
+
+step "Updates: Panel über den Update-Dienst (Auftrag wie aus dem Panel)"
+echo "$TARGET" | sudo -u pombot tee /var/lib/pombot-panel/update/request >/dev/null
+for i in $(seq 1 90); do
+  STATE="$(sudo cat /var/log/pombot-update.json 2>/dev/null | json 'd["state"]' 2>/dev/null || true)"
+  [ "$STATE" = "ok" ] || [ "$STATE" = "error" ] && break
+  sleep 5
+done
+sudo tail -20 /var/log/pombot-update.log
+[ "$STATE" = "ok" ] || fail "Panel-Update endete mit '$STATE'"
+[ -e /var/lib/pombot-panel/update/request ] && fail "Auftrag wurde nicht entfernt"
+dpkg -s pombot-panel | grep "^Version: ${TARGET#v}$" || fail "pombot-panel hat nicht die Version ${TARGET#v}"
+for i in $(seq 1 30); do curl -sk -m 5 "$API/api/auth/config" | grep -q "\"${TARGET#v}\"" && break; sleep 3; done
+curl -sk "$API/api/auth/config"; echo
+curl -sk "$API/api/auth/config" | grep -q "\"${TARGET#v}\"" || fail "Panel läuft nach dem Update nicht mit ${TARGET#v}"
+end
+
 echo "Integrationstest erfolgreich."

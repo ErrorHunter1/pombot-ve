@@ -110,7 +110,8 @@ finish "$A" pombot-agent
 P="$BUILD/pombot-panel"
 mkdir -p "$P/DEBIAN" "$P/opt/pombot/panel" "$P/usr/lib/systemd/system" "$P/usr/bin"
 copy_clean "$ROOT/panel/pombot_panel" "$P/opt/pombot/panel/pombot_panel"
-cp "$ROOT/panel/requirements.txt" "$ROOT/panel/setup-panel.sh" "$P/opt/pombot/panel/"
+cp "$ROOT/panel/requirements.txt" "$ROOT/panel/setup-panel.sh" "$ROOT/panel/pombot-update.sh" \
+  "$ROOT/panel/pombot-update.service" "$ROOT/panel/pombot-update.path" "$P/opt/pombot/panel/"
 copy_clean "$ROOT/agent" "$P/opt/pombot/agent-src"
 cp "$ROOT/panel/pombot-panel.service" "$P/usr/lib/systemd/system/pombot-panel.service"
 cp "$ROOT/panel/pombot-panel-cli" "$P/usr/bin/pombot-panel"
@@ -148,6 +149,8 @@ set -e
 if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
   systemctl stop pombot-panel >/dev/null 2>&1 || true
   systemctl disable pombot-panel >/dev/null 2>&1 || true
+  systemctl disable --now pombot-update.path >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/pombot-update.path /etc/systemd/system/pombot-update.service
 fi
 exit 0
 EOF

@@ -28,7 +28,7 @@ def _int(name: str, default: int) -> int:
 
 
 class Settings:
-    version = "0.7.1"
+    version = "0.8.0"
     secret_key = os.environ.get("POMBOT_SECRET_KEY", "")
     db_url = os.environ.get("POMBOT_DB_URL", "sqlite:///./pombot-panel.db")
     base_url = os.environ.get("POMBOT_BASE_URL", "http://localhost:8443").rstrip("/")
@@ -67,6 +67,10 @@ class Settings:
     antispoof = os.environ.get("POMBOT_ANTISPOOF", "1") == "1"
     # Maximal aufbewahrte automatische Backups pro Server (für normale Benutzer)
     max_auto_backups = _int("POMBOT_MAX_AUTO_BACKUPS", 7)
+
+    # Updates: alle x Stunden auf GitHub nach einer neuen Version sehen (0 = nie)
+    update_check_hours = _int("POMBOT_UPDATE_CHECK_HOURS", 6)
+    update_repo = os.environ.get("POMBOT_UPDATE_REPO", "ErrorHunter1/pombot-ve")
 
     @property
     def https(self) -> bool:
