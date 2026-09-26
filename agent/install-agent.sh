@@ -100,7 +100,18 @@ else
   sed -i "s|^POMBOT_AGENT_PORT=.*|POMBOT_AGENT_PORT=$PORT|" "$ENV"
   if [ -n "$ALLOW" ]; then sed -i "s|^POMBOT_AGENT_ALLOW=.*|POMBOT_AGENT_ALLOW=$ALLOW|" "$ENV"; fi
 fi
-if [ "$LOCAL" -eq 1 ]; then sed -i "s|^POMBOT_AGENT_BIND=.*|POMBOT_AGENT_BIND=127.0.0.1|" "$ENV"; fi
+# Bind-Adresse passend zum Modus setzen: --local = nur 127.0.0.1; Installation für ein entferntes Panel
+# (--allow ohne --local, z. B. per SSH aus dem Panel) = 0.0.0.0 – auch wenn eine ältere Konfiguration
+# von „Panel + Node auf demselben Server“ noch 127.0.0.1 enthält. Paket-Updates ohne Optionen ändern nichts.
+BIND=""
+if [ "$LOCAL" -eq 1 ]; then BIND=127.0.0.1; elif [ -n "$ALLOW" ]; then BIND=0.0.0.0; fi
+if [ -z "$BIND" ]; then
+  :
+elif grep -q '^POMBOT_AGENT_BIND=' "$ENV"; then
+  sed -i "s|^POMBOT_AGENT_BIND=.*|POMBOT_AGENT_BIND=$BIND|" "$ENV"
+else
+  echo "POMBOT_AGENT_BIND=$BIND" >> "$ENV"
+fi
 # shellcheck disable=SC1090
 . "$ENV"
 
