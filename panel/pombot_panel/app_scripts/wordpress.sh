@@ -1,6 +1,6 @@
 log "Installiere nginx, MariaDB und PHP …"
 apt_install nginx mariadb-server php-fpm php-mysql php-curl php-gd php-mbstring php-xml php-zip php-intl unzip
-systemctl enable --now mariadb nginx
+enable_now mariadb nginx "$(php_fpm)"
 
 DBPW="$(genpw 24)"
 log "Lege Datenbank an …"

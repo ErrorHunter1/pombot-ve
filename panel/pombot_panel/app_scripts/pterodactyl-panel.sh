@@ -3,7 +3,7 @@
 log "Installiere nginx, MariaDB, Redis und PHP …"
 apt_install nginx mariadb-server redis-server tar unzip git cron \
   php-cli php-fpm php-common php-gd php-mysql php-mbstring php-bcmath php-xml php-curl php-zip php-intl
-systemctl enable --now mariadb redis-server nginx cron
+enable_now mariadb redis-server nginx cron "$(php_fpm)"
 
 log "Installiere Composer …"
 curl -fsSL https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
@@ -115,7 +115,7 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now pteroq.service
+enable_now pteroq.service
 
 info "Pterodactyl Panel: ${URL}"
 info "Admin: ${APP_ADMIN:-admin} (${APP_EMAIL}) / Passwort: ${ADMINPW}"
