@@ -45,9 +45,14 @@ ProtectControlGroups=no
 ProtectProc=default
 ProcSubset=all
 RestrictNamespaces=no
+PrivateMounts=no
+PrivateIPC=no
 ReadWritePaths=
 ReadOnlyPaths=
 InaccessiblePaths=
+TemporaryFileSystem=
+BindPaths=
+BindReadOnlyPaths=
 UNIT
     systemctl daemon-reload
     systemctl reset-failed "$svc" || true

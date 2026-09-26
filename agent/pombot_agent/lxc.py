@@ -73,6 +73,19 @@ def _rootfs(name: str) -> tuple[str, Path]:
     return "dir", Path(raw or _dir(name) / "rootfs")
 
 
+def nesting_conf() -> list[str]:
+    """„Nesting“ wie bei Proxmox: erlaubt systemd im Container eigene Namespaces für Dienste mit Sandboxing
+    (z. B. Redis, MariaDB – sonst 226/NAMESPACE). LXC erzeugt dafür selbst ein passendes AppArmor-Profil."""
+    enabled = Path("/sys/module/apparmor/parameters/enabled")
+    try:
+        apparmor = enabled.read_text().strip().upper().startswith("Y")
+    except OSError:
+        apparmor = False
+    if apparmor and not shutil.which("apparmor_parser"):
+        return []  # generiertes Profil ließe sich nicht laden – lieber ohne Nesting als gar nicht starten
+    return ["lxc.apparmor.profile = generated", "lxc.apparmor.allow_nesting = 1"]
+
+
 def _limits(cores: int, memory_mb: int) -> dict:
     return {"lxc.cgroup2.cpu.max": f"{int(cores) * 100000} 100000",
             "lxc.cgroup2.memory.max": f"{int(memory_mb)}M",
@@ -221,6 +234,7 @@ def create(job, spec: dict) -> dict:
     ]
     if LXC_UNPRIVILEGED:
         base_conf += ["lxc.idmap = u 0 100000 65536", "lxc.idmap = g 0 100000 65536"]
+    base_conf += nesting_conf()
     with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
         fh.write("\n".join(base_conf) + "\n")
         conf_path = fh.name
