@@ -15,6 +15,7 @@ from .util import CmdError, run
 REPO = os.environ.get("POMBOT_UPDATE_REPO", "ErrorHunter1/pombot-ve")
 STATUS = Path("/var/log/pombot-agent-update.json")
 LOG = Path("/var/log/pombot-agent-update.log")
+SCRIPT_PATH = Path("/var/lib/pombot/agent-update.sh")
 TAG_RE = re.compile(r"^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -27,7 +28,7 @@ exec >>/var/log/pombot-agent-update.log 2>&1
 echo "$(date '+%F %T') Agent-Update auf $TAG (github.com/$REPO)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 DEB="$TMP/pombot-agent_${VER}_all.deb"
-if ! curl -fsSL --retry 3 -o "$DEB" "https://github.com/$REPO/releases/download/$TAG/pombot-agent_${VER}_all.deb"; then
+if ! curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors -o "$DEB" "https://github.com/$REPO/releases/download/$TAG/pombot-agent_${VER}_all.deb"; then
   echo "Download fehlgeschlagen"; status error "Download fehlgeschlagen"; exit 1
 fi
 status running "Installiere $TAG (Agent startet dabei neu) …"
@@ -63,6 +64,11 @@ def start(tag: str) -> dict:
         raise CmdError("Es läuft bereits ein Update")
     LOG.write_text("")
     STATUS.write_text(json.dumps({"state": "running", "message": "Update gestartet …", "tag": tag, "time": time.time()}))
+    # Skript als Datei übergeben: systemd ersetzt ${…} in Befehlszeilen-Argumenten durch eigene (leere)
+    # Umgebungsvariablen – als Inline-Skript würde aus ${VER} ein leerer Text.
+    SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCRIPT_PATH.write_text(SCRIPT)
+    SCRIPT_PATH.chmod(0o700)
     unit = f"pombot-agent-update-{int(time.time())}"
-    run(["systemd-run", f"--unit={unit}", "--collect", "--quiet", "/bin/bash", "-c", SCRIPT, "pombot-agent-update", tag, REPO])
+    run(["systemd-run", f"--unit={unit}", "--collect", "--quiet", "/bin/bash", SCRIPT_PATH, tag, REPO])
     return {"ok": True, "unit": unit}

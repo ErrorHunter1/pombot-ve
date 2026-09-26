@@ -240,7 +240,7 @@ def create(job, spec: dict) -> dict:
         for key, value in _limits(spec["cores"], spec["memory_mb"]).items():
             set_config(name, key, value)
         _set_net_config(name, spec.get("ips") or [])
-        set_config(name, "lxc.start.auto", "1")
+        set_config(name, "lxc.start.auto", "1" if spec.get("onboot", True) else "0")
         set_config(name, "lxc.uts.name", (spec.get("hostname") or name).split(".")[0])
         job.write("Starte Container …")
         _start(name, job)
@@ -253,6 +253,10 @@ def create(job, spec: dict) -> dict:
                 input_text=f"root:{spec['password']}\n", log=False)
         job.write("Installiere und konfiguriere SSH …")
         _log_output(job, attach(name, _ssh_script(spec), job=job, log=False, timeout=1200))
+        if spec.get("app_script"):
+            from . import apps
+            job.write("Starte Installation der Anwendung …")
+            apps.start_in_container(name, spec["app_script"], job)
     except Exception:
         job.write("Räume nach Fehler auf …")
         run(["lxc-stop", "-n", name, "-k"], check=False)

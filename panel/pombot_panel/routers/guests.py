@@ -11,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect as ws_connect
 
-from .. import backup_targets, cluster, ipam, ops
+import json
+
+from .. import apps, backup_targets, cluster, ipam, ops
 from ..agent_client import AgentClient, AgentError
 from ..db import SessionLocal, get_db, session_scope
 from ..models import Guest, IPAddress, IPPool, Node, Template, User
@@ -37,6 +39,8 @@ def guest_dict(g: Guest) -> dict:
         "created_at": g.created_at.isoformat() + "Z",
         "ips": [_ip_view(ip, g) for ip in g.ips],
         "storage_id": g.storage_id, "storage": g.storage.name if g.storage else None, "ha": g.ha,
+        "app_id": g.app_id, "app": apps.BY_ID[g.app_id]["name"] if g.app_id in apps.BY_ID else None,
+        "onboot": g.onboot, "protected": g.protected, "tags": [t for t in (g.tags or "").split(",") if t],
     }
 
 
@@ -111,6 +115,8 @@ class CreateBody(BaseModel):
     ssh_keys: str = ""
     owner_id: int | None = None
     storage_id: int | None = None  # gemeinsamer Speicher (None = lokal auf dem Node)
+    app_id: str | None = Field(default=None, max_length=40)  # Anwendung mitinstallieren (apps.py)
+    app_params: dict = {}
 
 
 @router.post("")
@@ -151,6 +157,9 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
     password = body.password or generate_password()
     keys = _keys(body.ssh_keys) or _keys(owner.ssh_keys)
     storage = cluster.get_visible(db, user, body.storage_id)
+    app = apps.get(body.app_id)
+    app_params = apps.validate(app, body.app_params, gtype, template, body.cores, body.memory_mb, body.disk_gb,
+                               body.hostname) if app else {}
 
     with ipam.alloc_lock:
         node, v4, v6 = ops.resolve_placement(db, owner if not user.is_admin else user, gtype,
@@ -163,7 +172,8 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
                       type=gtype, node_id=node.id, owner_id=owner.id,
                       template_id=template.id if template else None, iso_file=body.iso_file,
                       cores=body.cores, memory_mb=body.memory_mb, disk_gb=body.disk_gb, mac=ops.new_mac(db),
-                      storage_id=storage.id if storage else None, status="creating", power="unknown")
+                      storage_id=storage.id if storage else None, status="creating", power="unknown",
+                      app_id=app["id"] if app else None, app_params=json.dumps(app_params))
         db.add(guest)
         db.flush()
         for pool in pools:
@@ -192,6 +202,12 @@ class PatchBody(BaseModel):
     notes: str | None = Field(default=None, max_length=10000)
     owner_id: int | None = None
     ha: bool | None = None
+    onboot: bool | None = None
+    protected: bool | None = None
+    tags: list[str] | None = None
+
+
+TAG = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,23}$")
 
 
 @router.patch("/{guest_id}")
@@ -209,6 +225,26 @@ def patch_guest(guest_id: int, body: PatchBody, request: Request, user: User = D
             raise HTTPException(400, "Benutzer nicht gefunden")
         audit(db, user, "guest-owner", f"#{g.vmid} -> Benutzer {body.owner_id}", client_ip(request))
         g.owner_id = body.owner_id
+    if body.tags is not None:
+        tags = []
+        for raw in body.tags:
+            t = raw.strip().lower().replace(" ", "-")
+            if t and t not in tags:
+                if not TAG.match(t):
+                    raise HTTPException(400, f"Ungültiger Tag „{raw}“ (a–z, 0–9, - _ ., max. 24 Zeichen)")
+                tags.append(t)
+        if len(tags) > 10:
+            raise HTTPException(400, "Höchstens 10 Tags")
+        g.tags = ",".join(tags)
+    if body.protected is not None and body.protected != g.protected:
+        g.protected = body.protected
+        audit(db, user, "guest-protect", f"#{g.vmid} Löschschutz {'an' if body.protected else 'aus'}", client_ip(request))
+    if body.onboot is not None and body.onboot != g.onboot:
+        if g.ha:
+            raise HTTPException(400, "Bei HA-Servern entscheidet das Panel über den Start – erst HA ausschalten")
+        _ensure_ready(g)
+        _call(lambda: _agent(g).request("PUT", f"/guests/{g.agent_name}/autostart", {"enabled": body.onboot}, timeout=30))
+        g.onboot = body.onboot
     if body.ha is not None and body.ha != g.ha:
         if not user.is_admin:
             raise HTTPException(403, "Nur Administratoren können HA ein- oder ausschalten")
@@ -533,10 +569,85 @@ def migrate_guest(guest_id: int, body: MigrateBody, request: Request, user: User
     return {"task_id": task.id}
 
 
+@router.get("/{guest_id}/app")
+def guest_app(guest_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Fortschritt und Zugangsdaten der mitinstallierten Anwendung (aus dem Server gelesen)."""
+    g = guest_for(db, user, guest_id)
+    if not g.app_id:
+        raise HTTPException(404, "Keine Anwendung installiert")
+    if g.status == "creating":
+        return {"state": "creating", "log": [], "info": ""}
+    return _call(lambda: _agent(g).request("GET", f"/guests/{g.agent_name}/app", timeout=60))
+
+
+class CloneBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    hostname: str = Field(pattern=HOSTNAME)
+    ipv4_pool: str | int = "auto"
+    ipv6_pool: str | int = "auto"  # auto = wie die Quelle (falls sie IPv6 hat)
+    password: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/{guest_id}/clone")
+def clone_guest(guest_id: int, body: CloneBody, request: Request, user: User = Depends(current_user),
+                db: Session = Depends(get_db)):
+    """Vollständige Kopie auf demselben Node – zählt wie ein neuer Server gegen das Kontingent."""
+    src = guest_for(db, user, guest_id)
+    _ensure_ready(src)
+    if body.password and len(body.password) < 8:
+        raise HTTPException(400, "Das Passwort muss mindestens 8 Zeichen lang sein")
+    owner = src.owner
+    has6 = any(ipam.version_of(ip.pool) == 6 for ip in src.ips)
+    v6_choice = body.ipv6_pool if body.ipv6_pool != "auto" or has6 else "none"
+    if not src.ips and body.ipv4_pool == "auto":
+        v4_choice = "none"
+    else:
+        v4_choice = body.ipv4_pool
+    password = body.password or generate_password()
+    keys = _keys(owner.ssh_keys)
+    with ipam.alloc_lock:
+        node, v4, v6 = ops.resolve_placement(db, user if user.is_admin else owner, src.type, src.node_id,
+                                             v4_choice, v6_choice, src.storage_id)
+        pools = [p for p in (v4, v6) if p]
+        ops.check_quota(db, owner, guests=1, cores=src.cores, memory_mb=src.memory_mb, disk_gb=src.disk_gb,
+                        ips=len(pools))
+        g = Guest(vmid=ops.next_vmid(db), name=body.name.strip(), hostname=body.hostname, type=src.type,
+                  node_id=node.id, owner_id=owner.id, template_id=src.template_id, iso_file=src.iso_file,
+                  cores=src.cores, memory_mb=src.memory_mb, disk_gb=src.disk_gb, mac=ops.new_mac(db),
+                  storage_id=src.storage_id, app_id=src.app_id, app_params=src.app_params, tags=src.tags,
+                  notes=src.notes, status="creating", power="unknown")
+        db.add(g)
+        db.flush()
+        for pool in pools:
+            ip = ipam.allocate(db, pool, g.id)
+            if not ip:
+                db.rollback()
+                raise HTTPException(400, f"Pool {pool.name} hat keine freien Adressen mehr")
+            fixed_mac = ipam.pool_macs(pool).get(ip.address)
+            if fixed_mac:
+                if db.scalar(select(Guest.id).where(Guest.mac == fixed_mac, Guest.id != g.id)):
+                    db.rollback()
+                    raise HTTPException(400, f"Die MAC {fixed_mac} für {ip.address} nutzt bereits ein anderer Server")
+                g.mac = fixed_mac
+        # Firewall-Regeln der Quelle übernehmen (Spoofing-Schutz gilt automatisch für die neuen IPs)
+        from ..models import FirewallConfig
+        fw = db.get(FirewallConfig, src.id)
+        if fw:
+            db.add(FirewallConfig(guest_id=g.id, enabled=fw.enabled, policy_in=fw.policy_in, policy_out=fw.policy_out,
+                                  antispoof=fw.antispoof, rules_json=fw.rules_json))
+        task = create_task(db, user.id, "clone", f"{src.name} (#{src.vmid}) → {g.name} (#{g.vmid})", node.id, g.id)
+        audit(db, user, "guest-clone", f"#{src.vmid} -> #{g.vmid} {g.name}", client_ip(request))
+        db.commit()
+    submit(run_task(task.id, ops.op_clone(task.id, src.id, g.id, password, keys)))
+    return {"guest_id": g.id, "task_id": task.id, "password": password, "vmid": g.vmid}
+
+
 class ReinstallBody(BaseModel):
     template_id: int | None = None
     password: str | None = Field(default=None, max_length=128)
     ssh_keys: str = ""
+    app: str = Field(default="keep", max_length=40)  # keep | none | <Anwendungs-ID>
+    app_params: dict = {}
 
 
 @router.post("/{guest_id}/reinstall")
@@ -544,6 +655,8 @@ def reinstall_guest(guest_id: int, body: ReinstallBody, request: Request, user: 
                     db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
     _ensure_ready(g)
+    if g.protected:
+        raise HTTPException(400, "Löschschutz ist aktiv – Neuinstallation nicht möglich")
     if body.template_id:
         tpl = db.get(Template, body.template_id)
         if not tpl or (not tpl.enabled and not user.is_admin):
@@ -555,6 +668,15 @@ def reinstall_guest(guest_id: int, body: ReinstallBody, request: Request, user: 
         g.template_id, g.iso_file = tpl.id, None
     if not g.template_id and not g.iso_file:
         raise HTTPException(400, "Bitte eine Vorlage wählen")
+    if body.app == "none":
+        g.app_id, g.app_params = None, ""
+    elif body.app != "keep" or g.app_id:
+        app = apps.get(g.app_id if body.app == "keep" else body.app)
+        params = json.loads(g.app_params or "{}") if body.app == "keep" else body.app_params
+        new_tpl = db.get(Template, g.template_id) if g.template_id and not g.iso_file else None  # ggf. gerade geändert
+        clean = apps.validate(app, params, g.type, new_tpl, g.cores, g.memory_mb,
+                              g.disk_gb, g.hostname)
+        g.app_id, g.app_params = app["id"], json.dumps(clean)
     password = body.password or generate_password()
     keys = _keys(body.ssh_keys) or _keys(g.owner.ssh_keys)
     task = create_task(db, user.id, "reinstall", f"{g.name} (#{g.vmid})", g.node_id, g.id)
@@ -568,6 +690,8 @@ def reinstall_guest(guest_id: int, body: ReinstallBody, request: Request, user: 
 def delete_guest(guest_id: int, request: Request, force: bool = False, user: User = Depends(current_user),
                  db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
+    if g.protected:
+        raise HTTPException(400, "Löschschutz ist aktiv – erst in den Einstellungen des Servers ausschalten")
     if force and not user.is_admin:
         raise HTTPException(403, "Erzwungenes Löschen nur für Administratoren")
     if g.status in ("creating", "deleting") and not force:

@@ -193,9 +193,14 @@ def build_spec(db: Session, guest: Guest, template: Template | None, password: s
         "password": password,
         "ssh_keys": ssh_keys,
         "instance_suffix": suffix,
+        "onboot": bool(guest.onboot) and not guest.ha,  # HA-Server startet das Panel selbst
     }
     if guest.storage_id:
         spec["storage_id"] = str(guest.storage_id)
+    from .apps import build_script
+    script = build_script(guest)
+    if script:
+        spec["app_script"] = script
     if template is None:
         if not guest.iso_file:
             raise AgentError("Server hat weder Vorlage noch ISO")
@@ -284,6 +289,23 @@ async def op_delete(task_id: int, guest_id: int, force: bool = False) -> None:
                 db.delete(ip)
             db.delete(guest)
     task_log(task_id, "Server und IP-Zuweisungen entfernt.")
+
+
+async def op_clone(task_id: int, src_id: int, guest_id: int, password: str, ssh_keys: list[str]) -> None:
+    """Vollständige Kopie eines Servers auf demselben Node (neue IPs, neuer Hostname, neues Passwort)."""
+    with session_scope() as db:
+        src, guest = db.get(Guest, src_id), db.get(Guest, guest_id)
+        spec = build_spec(db, guest, guest.template, password, ssh_keys, suffix=secrets.token_hex(4))
+        spec.pop("app_script", None)  # die Anwendung ist im Klon bereits installiert
+        client, src_name = AgentClient.for_node(src.node), src.agent_name
+    task_log(task_id, f"Klone {src_name} → {spec['name']} – IP: {', '.join(i['address'] for i in spec['ips']) or 'DHCP'}")
+    try:
+        result = await agent_job(task_id, client, "POST", f"/guests/{src_name}/clone", spec)
+    except Exception as exc:
+        _set_guest(guest_id, status="error", error=str(exc))
+        raise
+    _set_guest(guest_id, status="ready", error=None, power=result.get("state", "unknown"))
+    await _apply_firewall(task_id, guest_id)
 
 
 async def op_job(task_id: int, guest_id: int, method: str, path: str, payload=None, after=None) -> None:

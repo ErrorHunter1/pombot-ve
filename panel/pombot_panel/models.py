@@ -133,6 +133,11 @@ class Guest(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     storage_id: Mapped[int | None] = mapped_column(ForeignKey("storages.id"))  # gemeinsamer Speicher (None = lokal)
     ha: Mapped[bool] = mapped_column(Boolean, default=False)  # bei Node-Ausfall auf anderem Node starten
+    app_id: Mapped[str | None] = mapped_column(String(40))  # mitinstallierte Anwendung (apps.py)
+    app_params: Mapped[str] = mapped_column(Text, default="")  # Eingaben dazu (JSON)
+    onboot: Mapped[bool] = mapped_column(Boolean, default=True)  # beim Start des Nodes mitstarten
+    protected: Mapped[bool] = mapped_column(Boolean, default=False)  # Löschschutz (kein Löschen/Neuinstallieren)
+    tags: Mapped[str] = mapped_column(String(255), default="")  # Komma-getrennt, z. B. "web,kunde-a"
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     node: Mapped[Node] = relationship(back_populates="guests")

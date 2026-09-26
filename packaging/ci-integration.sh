@@ -250,7 +250,7 @@ if [ -e /dev/kvm ]; then
   sudo chmod 666 /dev/kvm || true
   KTPL="$(api GET /api/templates | json '[t["id"] for t in d if t["type"]=="kvm" and t["name"].startswith("Debian 12")][0]')"
   CIPOOL="$(api GET /api/pools | json '[p["id"] for p in d if p["name"]=="ci"][0]')"
-  RES="$(api POST /api/guests "{\"template_id\":$KTPL,\"name\":\"ci-vm\",\"hostname\":\"ci-vm\",\"cores\":2,\"memory_mb\":1024,\"disk_gb\":8,\"ipv4_pool\":$CIPOOL,\"password\":\"CiTestPasswort1\"}")"
+  RES="$(api POST /api/guests "{\"template_id\":$KTPL,\"name\":\"ci-vm\",\"hostname\":\"ci-vm\",\"cores\":2,\"memory_mb\":1024,\"disk_gb\":8,\"ipv4_pool\":$CIPOOL,\"app_id\":\"nginx\",\"password\":\"CiTestPasswort1\"}")"
   echo "$RES"
   KGID="$(echo "$RES" | json 'd["guest_id"]')"
   KVMID="$(echo "$RES" | json 'd["vmid"]')"
@@ -277,6 +277,34 @@ if [ -e /dev/kvm ]; then
   fi
   sleep 20
   api GET "/api/guests/$KGID/status" | json 'd["state"], d["cpu"], d["memory_used"]'
+
+  echo "Anwendung in der VM (cloud-init, Status über qemu-guest-agent) …"
+  for i in $(seq 1 60); do
+    AST="$(api GET "/api/guests/$KGID/app" | json 'd["state"]' 2>/dev/null || true)"
+    [ "$AST" = "ok" ] || [ "$AST" = "error" ] && break
+    sleep 10
+  done
+  api GET "/api/guests/$KGID/app" | json '"\n".join(d["log"][-15:]) + "\n--- Info ---\n" + d["info"]'
+  [ "$AST" = "ok" ] || fail "Anwendung in der VM endete mit '$AST'"
+  curl -fsS -m 10 "http://$KIP/" | grep -qi nginx || fail "nginx in der VM antwortet nicht"
+
+  echo "Klone die laufende VM …"
+  RES="$(api POST "/api/guests/$KGID/clone" '{"name":"ci-vm-klon","hostname":"ci-vm-klon"}')"
+  echo "$RES"
+  CGID="$(echo "$RES" | json 'd["guest_id"]')"
+  CVMID="$(echo "$RES" | json 'd["vmid"]')"
+  wait_task "$(echo "$RES" | json 'd["task_id"]')" 1500
+  CIP="$(api GET "/api/guests/$CGID" | json 'd["ips"][0]["address"]')"
+  [ "$CIP" != "$KIP" ] || fail "VM-Klon hat dieselbe IP"
+  [ "$(sudo virsh domstate "pv$KVMID")" = "running" ] || fail "Quell-VM läuft nach dem Klonen nicht mehr"
+  sudo virsh snapshot-list "pv$KVMID" --name | grep -q pvclone && fail "Klon-Snapshot wurde nicht entfernt"
+  for i in $(seq 1 72); do
+    if curl -fsS -m 3 "http://$CIP/" >/dev/null 2>&1; then echo "Klon antwortet auf $CIP nach $((i * 5)) s"; break; fi
+    sleep 5
+  done
+  curl -fsS -m 10 "http://$CIP/" | grep -qi nginx || fail "VM-Klon antwortet nicht auf seiner neuen IP"
+  wait_task "$(api DELETE "/api/guests/$CGID" | json 'd["task_id"]')" 300
+
   wait_task "$(api DELETE "/api/guests/$KGID" | json 'd["task_id"]')" 300
   sudo virsh list --all --name | grep -q "pv$KVMID" && fail "VM wurde nicht gelöscht"
 else
@@ -357,6 +385,82 @@ step "Geroutet: Löschen entfernt Route"
 wait_task "$(api DELETE "/api/guests/$RGID" | json 'd["task_id"]')" 300
 ip route show 192.0.2.10 | grep -q pbr0 && fail "Route wurde nicht entfernt"
 api GET /api/pools | json '[(p["name"], p["used"], p["size"]) for p in d]'
+end
+
+step "Branding & SEO"
+curl -sk "$API/robots.txt" | grep -q "Disallow: /" || fail "robots.txt sperrt nicht"
+api PUT /api/admin/branding '{"name":"CI Cloud","title":"CI Cloud Panel","description":"Test","keywords":"","indexing":false,"theme_color":"#224466"}' >/dev/null
+curl -sk "$API/" | grep -q "<title>CI Cloud Panel</title>" || fail "Seitentitel wurde nicht übernommen"
+curl -sk "$API/" | grep -q 'noindex, nofollow' || fail "noindex fehlt"
+printf '\x89PNG\r\n\x1a\n0000000000000000' > /tmp/logo.png
+curl -sk -b "$JAR" -X PUT -H "X-PomBot: 1" -H "Content-Type: image/png" --data-binary @/tmp/logo.png "$API/api/admin/branding/logo" | grep -q '"url":"/branding/logo' || fail "Logo-Upload fehlgeschlagen"
+curl -sk "$API/api/auth/config" | json 'd["brand"]'
+end
+
+app_wait() {  # app_wait GUEST_ID TIMEOUT_SEK
+  local gid="$1" limit="$2" waited=0 st=""
+  while [ "$waited" -lt "$limit" ]; do
+    st="$(api GET "/api/guests/$gid/app" | json 'd["state"]' 2>/dev/null || true)"
+    [ "$st" = "ok" ] || [ "$st" = "error" ] && break
+    sleep 10; waited=$((waited + 10))
+  done
+  api GET "/api/guests/$gid/app" | json '"\n".join(d["log"][-25:]) + "\n--- Info ---\n" + d["info"]'
+  [ "$st" = "ok" ] || fail "Installation der Anwendung endete mit '$st'"
+}
+
+step "Anwendung: nginx im Container"
+RES="$(api POST /api/guests "{\"template_id\":$TPL,\"name\":\"ci-app\",\"hostname\":\"ci-app\",\"cores\":1,\"memory_mb\":512,\"disk_gb\":4,\"app_id\":\"nginx\",\"password\":\"CiTestPasswort1\"}")"
+echo "$RES"
+AGID="$(echo "$RES" | json 'd["guest_id"]')"
+AVMID="$(echo "$RES" | json 'd["vmid"]')"
+wait_task "$(echo "$RES" | json 'd["task_id"]')" 1200
+app_wait "$AGID" 600
+AIP="$(api GET "/api/guests/$AGID" | json 'd["ips"][0]["address"]')"
+curl -fsS -m 10 "http://$AIP/" | grep -qi "nginx" || fail "nginx im Container antwortet nicht"
+echo "nginx antwortet auf $AIP"
+end
+
+step "Klonen eines laufenden Containers"
+sudo lxc-attach -n "pv$AVMID" -- sh -c 'echo klon-test > /var/www/html/klon.txt'
+RES="$(api POST "/api/guests/$AGID/clone" '{"name":"ci-klon","hostname":"ci-klon"}')"
+echo "$RES"
+KGID="$(echo "$RES" | json 'd["guest_id"]')"
+KVMID="$(echo "$RES" | json 'd["vmid"]')"
+wait_task "$(echo "$RES" | json 'd["task_id"]')" 900
+KIP="$(api GET "/api/guests/$KGID" | json 'd["ips"][0]["address"]')"
+[ "$KIP" != "$AIP" ] || fail "Klon hat dieselbe IP wie die Quelle"
+sudo lxc-info -n "pv$AVMID" -s | grep -q RUNNING || fail "Quelle läuft nach dem Klonen nicht mehr"
+sudo lxc-info -n "pv$KVMID" -s | grep -q RUNNING || fail "Klon läuft nicht"
+[ "$(sudo lxc-attach -n "pv$KVMID" -- hostname)" = "ci-klon" ] || fail "Hostname des Klons nicht gesetzt"
+curl -fsS -m 10 "http://$KIP/klon.txt" | grep -q klon-test || fail "Daten wurden nicht mitgeklont"
+K1="$(sudo lxc-attach -n "pv$AVMID" -- cat /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
+K2="$(sudo lxc-attach -n "pv$KVMID" -- cat /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
+[ -n "$K2" ] && [ "$K1" != "$K2" ] || fail "Klon hat dieselben SSH-Hostschlüssel"
+grep -q "pv$KVMID/rootdev" "/var/lib/lxc/pv$KVMID/config" 2>/dev/null || sudo grep -q "pv$KVMID/rootdev" "/var/lib/lxc/pv$KVMID/config" || fail "Rootfs-Pfad des Klons zeigt nicht auf den Klon"
+echo "Klon läuft auf $KIP mit eigenen Schlüsseln und den Daten der Quelle"
+end
+
+step "Optionen: Autostart, Löschschutz, Tags"
+api PATCH "/api/guests/$KGID" '{"onboot":false,"protected":true,"tags":["ci","Klon"]}' | json 'd["onboot"], d["protected"], d["tags"]'
+sudo grep -q "^lxc.start.auto = 0" "/var/lib/lxc/pv$KVMID/config" || fail "Autostart wurde nicht abgeschaltet"
+api DELETE "/api/guests/$KGID" | grep -q "Löschschutz" || fail "Löschschutz greift nicht"
+api PATCH "/api/guests/$KGID" '{"protected":false}' >/dev/null
+wait_task "$(api DELETE "/api/guests/$KGID" | json 'd["task_id"]')" 300
+wait_task "$(api DELETE "/api/guests/$AGID" | json 'd["task_id"]')" 300
+end
+
+step "Anwendung: Pterodactyl Panel im Container"
+RES="$(api POST /api/guests "{\"template_id\":$TPL,\"name\":\"ci-ptero\",\"hostname\":\"ci-ptero\",\"cores\":2,\"memory_mb\":2048,\"disk_gb\":10,\"app_id\":\"pterodactyl-panel\",\"app_params\":{\"APP_EMAIL\":\"admin@example.com\",\"APP_ADMIN\":\"ciadmin\"},\"password\":\"CiTestPasswort1\"}")"
+echo "$RES"
+PGID="$(echo "$RES" | json 'd["guest_id"]')"
+wait_task "$(echo "$RES" | json 'd["task_id"]')" 1200
+app_wait "$PGID" 1800
+PIP="$(api GET "/api/guests/$PGID" | json 'd["ips"][0]["address"]')"
+CODE="$(curl -s -o /tmp/ptero.html -w '%{http_code}' -m 20 -L "http://$PIP/auth/login")"
+echo "HTTP $CODE"
+[ "$CODE" = "200" ] && grep -qi "pterodactyl" /tmp/ptero.html || fail "Pterodactyl-Anmeldeseite nicht erreichbar"
+api GET "/api/guests/$PGID/app" | json 'd["info"]' | grep -q "Admin: ciadmin" || fail "Zugangsdaten fehlen"
+wait_task "$(api DELETE "/api/guests/$PGID" | json 'd["task_id"]')" 300
 end
 
 step "Updates: Prüfung über die API"

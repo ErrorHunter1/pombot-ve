@@ -45,6 +45,12 @@ def build_seed(target_dir: Path, spec: dict, job=None) -> Path:
     }
     if "." in hostname:
         user_data["fqdn"] = hostname
+    if spec.get("app_script"):
+        # Anwendung (z. B. mailcow) nach dem ersten Start im Hintergrund installieren
+        from .apps import cloud_init_parts
+        files, cmds = cloud_init_parts(spec["app_script"])
+        user_data["write_files"] += files
+        user_data["runcmd"] += cmds
     if spec.get("keep_access"):
         # Nur Netzwerk neu einrichten (z. B. nach MAC-Änderung): Passwort, Schlüssel und SSH-Einstellungen
         # des laufenden Systems bleiben unangetastet.

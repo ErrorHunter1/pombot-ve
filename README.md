@@ -191,6 +191,18 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
   Schutz vor doppelt laufenden Servern über Leases auf dem Speicher: Ein Node, der den Speicher 30 s lang nicht
   beschreiben kann, stoppt seine HA-Server selbst; übernommen wird erst, wenn die Lease abgelaufen ist.
   Kommt der alte Node zurück, wird der Server dort nur abgemeldet.
+- **Anwendungen per Klick mitinstallieren:** beim Erstellen (oder Neuinstallieren) eines Servers auswählen –
+  Pterodactyl Panel, Pterodactyl Wings, mailcow, WordPress, Nextcloud AIO, Coolify, Portainer, Nginx Proxy
+  Manager, Uptime Kuma, Docker, nginx. Die Installation läuft im Hintergrund im Server; Fortschritt, Log und die
+  erzeugten Zugangsdaten stehen in der Übersicht des Servers (und im Server in `/root/pombot-app-info.txt`).
+  Mindestressourcen und passender Servertyp (Docker-Anwendungen nur als VM) werden geprüft.
+- **Klonen:** vollständige Kopie eines Servers auf demselben Node mit neuer IP, neuem Hostnamen, neuem
+  Passwort und neuen SSH-Hostschlüsseln (VMs laufen dabei weiter, Container werden kurz gestoppt).
+- **Optionen pro Server:** Start beim Booten des Nodes an/aus, Löschschutz (kein Löschen/Neuinstallieren),
+  Tags mit Filter in der Serverliste (`#tag`).
+- **Branding & SEO:** Name, Seitentitel, Meta-Beschreibung, Schlüsselwörter, Indexierung durch Suchmaschinen
+  an/aus (`robots.txt`, `noindex`), Tab-Icon, Logo und Vorschaubild für geteilte Links
+  (Einstellungen → Branding & SEO).
 - **Firewall pro Server** (nftables auf dem Node): Regeln für ein-/ausgehend, TCP/UDP/ICMP, Ports und
   Portbereiche, Quell-/Zielnetze, Standardaktion, Vorlagen für SSH/Web/Ping/DNS/Mail
 - **Spoofing-Schutz**: Server können nur mit ihren eigenen IP-Adressen senden (standardmäßig immer aktiv)

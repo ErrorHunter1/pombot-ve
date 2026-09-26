@@ -185,7 +185,7 @@ def create(job, spec: dict) -> dict:
         xml_path = d / "domain.xml"
         xml_path.write_text(domain_xml(spec, disk, cdrom, kvm))
         run(["virsh", "define", xml_path], job=job)
-        run(["virsh", "autostart", name], job=job)
+        run(["virsh", "autostart", name] + ([] if spec.get("onboot", True) else ["--disable"]), job=job)
         run(["virsh", "start", name], job=job)
     except Exception:
         job.write("Räume nach Fehler auf …")

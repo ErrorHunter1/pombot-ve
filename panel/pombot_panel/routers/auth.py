@@ -25,8 +25,9 @@ class LoginBody(BaseModel):
 
 @router.get("/config")
 def auth_config():
+    from ..branding import public
     return {"discord": settings.discord_enabled, "registration": settings.registration,
-            "version": settings.version}
+            "version": settings.version, "brand": public()}
 
 
 @router.post("/login")

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import backup_targets, cluster, heartbeat, runtime, scheduler, tasks, updates
+from . import apps, backup_targets, branding, cluster, heartbeat, runtime, scheduler, tasks, updates
 from .config import settings
 from .db import SessionLocal, migrate
 from .routers import admin, auth, extras, guests, nodes, pools, system, users
@@ -53,13 +53,15 @@ async def csrf_and_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
+    for key, value in branding.robots_header().items():  # Indexierung aus: Suchmaschinen fernhalten
+        response.headers.setdefault(key, value)
     return response
 
 
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie="pombot_session",
                    max_age=7 * 24 * 3600, same_site="lax", https_only=settings.https)
 
-for r in (auth.router, admin.router, backup_targets.router, cluster.router, cluster.user_router, updates.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
+for r in (auth.router, admin.router, apps.router, branding.router, backup_targets.router, cluster.router, cluster.user_router, updates.router, users.router, extras.router, guests.router, nodes.router, pools.router, system.router):
     app.include_router(r)
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -69,6 +71,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 def index():
     # Versionsnummer an Skript/CSS hängen, damit Browser nach einem Update nicht die alte Version nutzen
     html = (STATIC / "index.html").read_text(encoding="utf-8").replace("__VERSION__", settings.version)
+    html = html.replace("__HEAD__", branding.head_html())
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

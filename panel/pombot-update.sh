@@ -55,7 +55,7 @@ FILES=()
 for pkg in "${PKGS[@]}"; do
   url="https://github.com/$REPO/releases/download/$TAG/${pkg}_${VER}_all.deb"
   echo "Lade $url"
-  if ! curl -fsSL --retry 3 -o "$TMP/${pkg}_${VER}_all.deb" "$url"; then
+  if ! curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors -o "$TMP/${pkg}_${VER}_all.deb" "$url"; then
     echo "Download fehlgeschlagen: $url"
     status error "Download von $pkg fehlgeschlagen"
     exit 1

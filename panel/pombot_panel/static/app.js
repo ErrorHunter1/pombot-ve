@@ -78,6 +78,12 @@ const discordIcon = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="t
 
 // ------------------------------------------------------------------ UI-Bausteine
 
+function brandHtml() {
+  const b = (S.cfg && S.cfg.brand) || { name: "PomBot VE" };
+  return b.logo ? `<img class="brand-img" src="${esc(b.logo)}" alt="">${esc(b.name)}`
+    : `<span class="brand-logo">${esc((b.name || "P").trim().charAt(0).toUpperCase())}</span>${esc(b.name)}`;
+}
+
 function toast(msg, type = "") {
   const el = document.createElement("div");
   el.className = `toast ${type}`;
@@ -270,7 +276,7 @@ function renderShell() {
   <div class="app">
     <header class="topbar">
       <button class="btn sm menu-btn" id="menu-btn" aria-label="Menü">${icon("menu")}</button>
-      <a class="brand" href="#/dashboard"><span class="brand-logo">P</span>PomBot VE</a>
+      <a class="brand" href="#/dashboard">${brandHtml()}</a>
       <span class="spacer"></span>
       <a class="btn sm hidden" id="update-btn" href="#/settings/update" title="Neue Version verfügbar">${icon("download")}<span></span></a>
       <a class="btn sm primary" href="#/create">${icon("plus")}<span>Server erstellen</span></a>
@@ -432,7 +438,7 @@ async function viewLogin(params) {
   const pending = params.get("pending");
   $("#root").innerHTML = `
   <div class="login-page"><div class="login-card">
-    <div class="brand"><span class="brand-logo">P</span>PomBot VE</div>
+    <div class="brand">${brandHtml()}</div>
     <div class="card"><div class="card-body" style="padding:24px">
       <h2 style="margin-bottom:4px">Anmelden</h2>
       <p class="muted" style="margin-top:0">Virtualisierung für deine Server.</p>
@@ -485,7 +491,7 @@ function taskRows(tasks) {
 const TASK_LABELS = {
   create: "Erstellen", delete: "Löschen", reinstall: "Neu installieren", resize: "Ressourcen ändern",
   snapshot: "Snapshot", "snapshot-delete": "Snapshot löschen", "snapshot-rollback": "Snapshot zurückspielen",
-  network: "Netzwerk ändern", domain: "Domain & Zertifikat", "iso-fetch": "ISO laden", migrate: "Umzug", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
+  network: "Netzwerk ändern", clone: "Klonen", domain: "Domain & Zertifikat", "iso-fetch": "ISO laden", migrate: "Umzug", backup: "Backup", "backup-auto": "Automatisches Backup", restore: "Wiederherstellen", "node-install": "Node installieren",
 };
 
 async function viewDashboard(params, m, silent, seq) {
@@ -530,6 +536,8 @@ async function viewGuests(params, m, silent, seq) {
   const filter = $("#guest-filter") ? $("#guest-filter").value : "";
   S.handlers.toggleAll = () => { S.showAll = !S.showAll; route(); };
   S.handlers.open = (ds) => { location.hash = `#/guest/${ds.id}`; };
+  S.handlers.tagFilter = (ds) => { $("#guest-filter").value = `#${ds.tag}`; $("#guest-filter").dispatchEvent(new Event("input")); };
+  const allTags = [...new Set(guests.flatMap((g) => g.tags || []))].sort();
   S.handlers.power = async (ds) => {
     await api(`/api/guests/${ds.id}/action`, { method: "POST", body: { action: ds.action } });
     toast(ds.action === "start" ? "Server wird gestartet" : "Server wird heruntergefahren");
@@ -540,10 +548,12 @@ async function viewGuests(params, m, silent, seq) {
       ${admin ? `<div class="seg"><button data-act="toggleAll" class="${S.showAll ? "" : "active"}">Meine</button><button data-act="toggleAll" class="${S.showAll ? "active" : ""}">Alle</button></div>` : ""}
       <a class="btn primary" href="#/create">${icon("plus")}Server erstellen</a>`)}
     <div class="card">
-      <div class="card-head"><input type="text" id="guest-filter" placeholder="Suchen nach Name, IP, VMID, Besitzer …" value="${esc(filter)}" style="max-width:360px"></div>
+      <div class="card-head" style="flex-wrap:wrap;gap:8px"><input type="text" id="guest-filter" placeholder="Suchen nach Name, IP, VMID, Besitzer, #tag …" value="${esc(filter)}" style="max-width:360px">
+        ${allTags.length ? `<div class="tag-bar">${allTags.map((t) => `<button class="tag" data-act="tagFilter" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div>` : ""}</div>
       ${guests.length ? `<div class="table-wrap"><table><thead><tr><th>Status</th><th>VMID</th><th>Name</th><th>Typ</th><th>IP-Adresse</th><th>Node</th>${admin ? "<th>Besitzer</th>" : ""}<th>Ressourcen</th><th></th></tr></thead><tbody>
-        ${guests.map((g) => `<tr class="click" data-act="open" data-id="${g.id}" data-search="${esc([g.name, g.hostname, g.vmid, guestIPs(g), g.owner, g.node].join(" ").toLowerCase())}">
-          <td>${guestBadge(g)}</td><td class="mono">${g.vmid}</td><td><strong>${esc(g.name)}</strong><div class="muted small">${esc(g.template || "")}</div></td>
+        ${guests.map((g) => `<tr class="click" data-act="open" data-id="${g.id}" data-search="${esc([g.name, g.hostname, g.vmid, guestIPs(g), g.owner, g.node, g.app || "", ...(g.tags || []).map((t) => "#" + t)].join(" ").toLowerCase())}">
+          <td>${guestBadge(g)}</td><td class="mono">${g.vmid}</td><td><strong>${esc(g.name)}</strong>${g.protected ? ` <span title="Löschschutz aktiv" class="muted">🔒</span>` : ""}<div class="muted small">${esc(g.template || "")}${g.app ? ` · ${esc(g.app)}` : ""}</div>
+            ${(g.tags || []).length ? `<div class="tag-row">${g.tags.map((t) => `<span class="tag">#${esc(t)}</span>`).join("")}</div>` : ""}</td>
           <td><span class="type-tag">${g.type === "kvm" ? "VM" : "CT"}</span></td><td class="mono">${esc(guestIPs(g))}</td><td>${esc(g.node || "–")}</td>
           ${admin ? `<td>${esc(g.owner)}</td>` : ""}
           <td class="nowrap small">${g.cores} CPU · ${fmtMB(g.memory_mb)} · ${g.disk_gb} GB</td>
@@ -652,8 +662,41 @@ async function guestOverview(g, shell, seq) {
         </dl>
         ${g.notes ? `<div style="margin-top:14px;white-space:pre-wrap" class="small">${esc(g.notes)}</div>` : ""}
       </div></div>
-    </div>`);
+    </div>
+    ${g.app_id ? `<div id="app-box" style="margin-top:16px">${(S.appCache || {})[g.id] || ""}</div>` : ""}`);
+  if (g.app_id) loadAppCard(g, seq);
   return { live: true };
+}
+
+const APP_STATES = {
+  creating: ["Server wird erstellt", "info"], unknown: ["Server startet …", "info"], queued: ["Wartet auf Start", "info"],
+  pending: ["Wird vorbereitet", "info"], running: ["Installation läuft", "info"], ok: ["Installiert", "good"],
+  error: ["Fehlgeschlagen", "bad"], stopped: ["Server gestoppt", ""],
+};
+
+async function loadAppCard(g, seq) {
+  let a;
+  try { a = await api(`/api/guests/${g.id}/app`); } catch (e) { a = { state: "unknown", log: [], info: "", error: e.message }; }
+  if (isStale(seq) || !$("#app-box")) return;
+  const [label, cls] = APP_STATES[a.state] || [a.state, ""];
+  const busy = ["creating", "unknown", "queued", "pending", "running"].includes(a.state);
+  const html = `<div class="card"><div class="card-head"><h2>Anwendung: ${esc(g.app || g.app_id)}</h2>${busy ? `<span class="spinner"></span> ` : ""}${badge(label, cls)}</div><div class="card-body">
+    ${a.state === "unknown" ? `<p class="muted" style="margin-top:0">Der Server startet noch bzw. der Gast-Agent ist noch nicht bereit. Die Installation beginnt automatisch nach dem ersten Start – bei VMs dauert das 1–3 Minuten.</p>` : ""}
+    ${a.state === "error" ? `<div class="alert bad" style="margin-bottom:12px">Die Installation ist fehlgeschlagen (${esc(a.detail || "")}). Details im Log unten; im Server unter <code>/var/log/pombot-app.log</code>.</div>` : ""}
+    ${a.info ? `<h3 style="margin:0 0 8px;font-size:14px">Zugang & nächste Schritte</h3><pre class="app-info">${esc(a.info)}</pre>
+      <p class="muted small">Steht auch im Server in <code>/root/pombot-app-info.txt</code>.</p>` : ""}
+    ${a.log && a.log.length ? `<details ${busy || a.state === "error" ? "open" : ""}><summary class="small">Installations-Log</summary>
+      <pre class="app-info" style="max-height:320px;overflow:auto;margin-top:8px">${esc(a.log.join("\n"))}</pre></details>` : ""}
+  </div></div>`;
+  S.appCache = S.appCache || {};
+  S.appCache[g.id] = html;
+  const box = $("#app-box");
+  const open = box.querySelector("details") && box.querySelector("details").open;
+  box.innerHTML = html;
+  const d = box.querySelector("details");
+  if (d && open) d.open = true;
+  const pre = box.querySelector("details pre");
+  if (pre && busy) pre.scrollTop = pre.scrollHeight;
 }
 
 function sliderRow(name, label, value, min, max, step, unit) {
@@ -984,6 +1027,76 @@ async function settingsBackupTargets(head) {
       Unterstützt: SFTP (z. B. Hetzner Storage Box), S3-kompatibel (AWS, Backblaze B2, Cloudflare R2, Wasabi, MinIO), NFS und SMB.</div>`}</div>`);
 }
 
+// ------------------------------------------------------------------ Branding & SEO (Einstellungen)
+
+async function settingsBranding(head) {
+  const b = await api("/api/admin/branding");
+  const imgCard = (kind, hint) => {
+    const img = b.images[kind];
+    return `<div class="brand-upload"><div class="brand-preview ${kind}">${img.url ? `<img src="${esc(img.url)}" alt="">` : `<span class="muted small">Standard</span>`}</div>
+      <div><strong>${esc(img.label)}</strong><div class="muted small">${hint}</div>
+        <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+          <label class="btn sm">Hochladen<input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/svg+xml,.ico" data-kind="${kind}" hidden></label>
+          ${img.url ? `<button class="btn sm danger" data-act="brandDel" data-kind="${kind}">Entfernen</button>` : ""}</div></div></div>`;
+  };
+  S.handlers.brandDel = async (ds) => {
+    await api(`/api/admin/branding/${ds.kind}`, { method: "DELETE" });
+    toast("Entfernt");
+    S.cfg = null;
+    location.reload();
+  };
+  setMain(head + `<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>Name & Suchmaschinen</h2></div><div class="card-body">
+      <form id="brand-form">
+        <label class="field"><span>Name des Panels (Kopfleiste, Anmeldung)</span><input type="text" name="name" maxlength="40" value="${esc(b.name)}" required></label>
+        <label class="field"><span>Seitentitel (Browser-Tab, Suchergebnis)</span><input type="text" name="title" maxlength="120" value="${esc(b.title)}"></label>
+        <label class="field"><span>Beschreibung (Meta-Description, Link-Vorschau)</span><textarea name="description" rows="3" maxlength="300">${esc(b.description)}</textarea></label>
+        <label class="field"><span>Schlüsselwörter (optional, Komma-getrennt)</span><input type="text" name="keywords" maxlength="300" value="${esc(b.keywords)}"></label>
+        <label class="field"><span>Farbe der Browserleiste (Handy)</span><input type="color" name="theme_color" value="${esc(b.theme_color)}" style="height:38px;padding:2px"></label>
+        <label class="check"><input type="checkbox" name="indexing" ${b.indexing ? "checked" : ""}><span><strong>Von Suchmaschinen indexieren lassen</strong><br>
+          <span class="muted small">Aus (empfohlen für Admin-Panels): <code>noindex</code> in Seite und HTTP-Header, <code>robots.txt</code> sperrt alles.
+          An: nur die Startseite ist auffindbar, API und Konsole bleiben gesperrt.</span></span></label>
+        <button class="btn primary" type="submit">Speichern</button>
+      </form></div></div>
+    <div class="stack">
+      <div class="card"><div class="card-head"><h2>Bilder</h2></div><div class="card-body stack" style="gap:16px">
+        ${imgCard("favicon", "Icon im Browser-Tab – quadratisch, z. B. 64×64 PNG, ICO oder SVG")}
+        ${imgCard("logo", "Ersetzt das „P“ in Kopfleiste und Anmeldung – z. B. 128×128 PNG oder SVG")}
+        ${imgCard("og", "Vorschaubild beim Teilen des Links (Discord, WhatsApp …) – ideal 1200×630")}
+        <p class="muted small" style="margin:0">PNG, JPG, WebP, GIF, ICO oder SVG, höchstens 2 MB.</p>
+      </div></div>
+      <div class="card"><div class="card-head"><h2>Vorschau in Suchmaschinen</h2></div><div class="card-body">
+        <div class="serp"><div class="serp-url">${esc(b.base_url)}</div><div class="serp-title">${esc(b.title || b.name)}</div>
+          <div class="serp-desc">${esc(b.description)}</div></div>
+        ${b.indexing ? "" : `<p class="muted small" style="margin-bottom:0">Indexierung ist aus – das Panel erscheint nicht in Suchergebnissen.</p>`}
+      </div></div>
+    </div></div>`);
+  $("#brand-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await api("/api/admin/branding", { method: "PUT", body: {
+      name: f.name.value, title: f.title.value, description: f.description.value, keywords: f.keywords.value,
+      theme_color: f.theme_color.value, indexing: f.indexing.checked } })
+      .then(() => { toast("Gespeichert"); S.cfg = null; setTimeout(() => location.reload(), 600); }).catch(fail);
+  };
+  $$('input[type=file][data-kind]').forEach((inp) => {
+    inp.onchange = async () => {
+      const file = inp.files[0];
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) return toast("Bild ist größer als 2 MB", "bad");
+      const type = file.type || (file.name.toLowerCase().endsWith(".ico") ? "image/x-icon" : "");
+      const res = await fetch(`/api/admin/branding/${inp.dataset.kind}`, { method: "PUT", body: file,
+        headers: { "Content-Type": type, "X-PomBot": "1" }, credentials: "same-origin" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return toast(err.detail || `Fehler ${res.status}`, "bad");
+      }
+      toast("Hochgeladen");
+      setTimeout(() => location.reload(), 500);
+    };
+  });
+}
+
 // ------------------------------------------------------------------ Updates (Einstellungen)
 
 async function refreshUpdateBadge(data) {
@@ -1255,7 +1368,8 @@ async function guestTasks(g, shell, seq) {
 
 async function guestSettings(g, shell) {
   const admin = S.me.role === "admin";
-  const [templates, users, cdHtml] = await Promise.all([api("/api/templates"), admin ? api("/api/users/brief") : [], cdromCard(g)]);
+  const [templates, users, cdHtml, appList] = await Promise.all([api("/api/templates"), admin ? api("/api/users/brief") : [], cdromCard(g),
+    api("/api/apps").catch(() => [])]);
   shell(`<div class="grid grid-2">
     <div class="card"><div class="card-head"><h2>Allgemein</h2></div><div class="card-body">
       <form id="gen-form">
@@ -1265,6 +1379,19 @@ async function guestSettings(g, shell) {
         <button class="btn primary" type="submit">Speichern</button>
       </form></div></div>
     <div class="stack">
+      <div class="card"><div class="card-head"><h2>Optionen</h2></div><div class="card-body">
+        <label class="check"><input type="checkbox" id="opt-onboot" ${g.onboot ? "checked" : ""} ${g.ha ? "disabled" : ""}><span>Beim Start des Nodes automatisch starten
+          ${g.ha ? `<br><span class="muted small">Bei HA-Servern übernimmt das Panel den Start.</span>` : ""}</span></label>
+        <label class="check"><input type="checkbox" id="opt-protected" ${g.protected ? "checked" : ""}><span>Löschschutz<br>
+          <span class="muted small">Verhindert Löschen und Neuinstallieren, bis er wieder ausgeschaltet wird.</span></span></label>
+        <label class="field" style="margin-top:12px"><span>Tags (Komma-getrennt)</span>
+          <div class="input-group"><input type="text" id="opt-tags" value="${esc((g.tags || []).join(", "))}" placeholder="z. B. web, kunde-a, produktion"><button class="btn" id="opt-tags-save" type="button">Speichern</button></div>
+          <div class="hint">In der Serverliste kannst du nach <code>#tag</code> filtern.</div></label>
+      </div></div>
+      <div class="card"><div class="card-head"><h2>Klonen</h2></div><div class="card-body">
+        <p class="muted" style="margin-top:0">Vollständige Kopie auf demselben Node mit neuer IP, neuem Hostnamen und neuem root-Passwort.
+          ${g.type === "kvm" ? "VMs werden aus einem kurzen Snapshot kopiert und laufen weiter." : "Container werden für die Kopie kurz gestoppt."} Zählt wie ein neuer Server.</p>
+        <button class="btn" data-act="clone" ${["ready"].includes(g.status) ? "" : "disabled"}>Klonen …</button></div></div>
       ${cdHtml}
       <div class="card"><div class="card-head"><h2>root-Passwort zurücksetzen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Erzeugt ein neues zufälliges Passwort und setzt es im laufenden System${g.type === "kvm" ? " (über den qemu-guest-agent)" : ""}.</p>
@@ -1278,10 +1405,15 @@ async function guestSettings(g, shell) {
       <div class="card"><div class="card-head"><h2>Neu installieren</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Setzt den Server mit einem frischen Betriebssystem neu auf. IP-Adressen bleiben erhalten, <strong>alle Daten werden gelöscht</strong>.</p>
         <div class="row"><select id="reinstall-tpl">${templates.filter((t) => t.type === g.type).map((t) => `<option value="${t.id}" ${t.id === g.template_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>
-        <button class="btn danger" style="flex:none" data-act="reinstall" ${["ready", "error"].includes(g.status) ? "" : "disabled"}>Neu installieren</button></div></div></div>
+        <button class="btn danger" style="flex:none" data-act="reinstall" ${["ready", "error"].includes(g.status) ? "" : "disabled"}>Neu installieren</button></div>
+        ${appList.length ? `<label class="field" style="margin-top:12px"><span>Anwendung</span><select id="reinstall-app">
+          ${g.app_id ? `<option value="keep">Behalten: ${esc(g.app || g.app_id)}</option>` : ""}<option value="none">Keine</option>
+          ${appList.filter((a) => a.types.includes(g.type) && a.id !== g.app_id).map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${esc(a.category)})</option>`).join("")}</select></label>
+          <div id="reinstall-app-fields"></div>` : ""}</div></div></div>
       <div class="card" style="border-color:var(--bad)"><div class="card-head"><h2>Server löschen</h2></div><div class="card-body">
         <p class="muted" style="margin-top:0">Löscht den Server inklusive Festplatte und Snapshots. Die IP-Adressen werden wieder freigegeben.</p>
-        <button class="btn danger solid" data-act="deleteGuest">Server endgültig löschen</button>
+        ${g.protected ? `<div class="alert warn" style="margin-bottom:10px">Löschschutz ist aktiv (oben unter „Optionen“).</div>` : ""}
+        <button class="btn danger solid" data-act="deleteGuest" ${g.protected ? "disabled" : ""}>Server endgültig löschen</button>
         ${admin ? `<label class="check" style="margin-top:12px"><input type="checkbox" id="force-del"><span class="small">Erzwingen (auch wenn der Node nicht erreichbar ist)</span></label>` : ""}
       </div></div>
     </div></div>`);
@@ -1347,9 +1479,54 @@ async function guestSettings(g, shell) {
       }
     };
   };
+  const patch = (body, msg) => api(`/api/guests/${g.id}`, { method: "PATCH", body }).then(() => { toast(msg); route(true); });
+  $("#opt-onboot").onchange = (e) => patch({ onboot: e.target.checked }, e.target.checked ? "Startet mit dem Node" : "Startet nicht mehr automatisch")
+    .catch((err) => { e.target.checked = !e.target.checked; fail(err); });
+  $("#opt-protected").onchange = (e) => patch({ protected: e.target.checked }, e.target.checked ? "Löschschutz aktiv" : "Löschschutz aus")
+    .catch((err) => { e.target.checked = !e.target.checked; fail(err); });
+  $("#opt-tags-save").onclick = () => patch({ tags: $("#opt-tags").value.split(",").map((t) => t.trim()).filter(Boolean) }, "Tags gespeichert").catch(fail);
+  S.handlers.clone = async () => {
+    const pools = await api("/api/pools");
+    const usable = (v) => pools.filter((p) => p.version === v && (!p.node_id || p.node_id === g.node_id));
+    const has6 = g.ips.some((i) => i.version === 6);
+    formModal({
+      title: `${g.name} klonen`, submit: "Klonen",
+      fields: `<div class="row"><label class="field"><span>Name</span><input type="text" name="name" value="${esc(g.name)} (Klon)" maxlength="64" required></label>
+          <label class="field"><span>Hostname</span><input type="text" name="hostname" value="${esc(g.hostname.split(".")[0])}-klon" maxlength="63" pattern="[A-Za-z0-9][A-Za-z0-9.-]*" required></label></div>
+        <div class="row"><label class="field"><span>IPv4</span><select name="ipv4_pool"><option value="auto">Automatisch</option>
+            ${usable(4).map((p) => `<option value="${p.id}">${esc(p.name)} – ${p.size - p.used} frei</option>`).join("")}<option value="none">Keine feste IPv4</option></select></label>
+          <label class="field"><span>IPv6</span><select name="ipv6_pool">${has6 ? `<option value="auto">Automatisch</option>` : ""}<option value="none">Keine</option>
+            ${usable(6).map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></label></div>
+        <label class="field"><span>root-Passwort</span><input type="password" name="password" autocomplete="new-password" placeholder="Leer lassen = sicheres Passwort erzeugen"></label>`,
+      onSubmit: async (d, mm) => {
+        const num = (v) => (/^\d+$/.test(v) ? +v : v);
+        const r = await api(`/api/guests/${g.id}/clone`, { method: "POST", body: {
+          name: d.name, hostname: d.hostname, ipv4_pool: num(d.ipv4_pool), ipv6_pool: num(d.ipv6_pool), password: d.password || null } });
+        mm.close();
+        showSecret("Klon wird erstellt", `Zugangsdaten für <strong>${esc(d.name)}</strong> (VMID ${r.vmid}) – Benutzer <code>root</code>:`, r.password,
+          `<a class="btn" href="#/guest/${r.guest_id}" data-close>Zum Klon</a>`);
+        watchTask(r.task_id, `Klonen: ${g.name}`);
+      },
+    });
+  };
+  const appSel = $("#reinstall-app");
+  if (appSel) appSel.onchange = () => {
+    const a = appList.find((x) => x.id === appSel.value);
+    $("#reinstall-app-fields").innerHTML = !a ? "" : `<p class="muted small" style="margin:6px 0">${esc(a.description)} Mindestens ${a.min.cores} CPU · ${fmtMB(a.min.memory_mb)} RAM · ${a.min.disk_gb} GB.</p>`
+      + a.fields.map((f) => f.kind === "bool"
+        ? `<label class="check"><input type="checkbox" data-env="${f.env}" ${f.default === "1" ? "checked" : ""}><span>${esc(f.label)}</span></label>`
+        : `<label class="field"><span>${esc(f.label)}${f.required ? "" : " <span class='muted'>(optional)</span>"}</span>
+            <input type="text" data-env="${f.env}" value="${esc(f.default || "")}" placeholder="${esc(f.hint || "")}" autocomplete="off"></label>`).join("");
+  };
   S.handlers.reinstall = async () => {
     if (!(await confirmBox("Server neu installieren?", "Alle Daten auf dem Server werden unwiderruflich gelöscht.", { danger: true, ok: "Neu installieren", requireText: g.vmid }))) return;
-    const r = await api(`/api/guests/${g.id}/reinstall`, { method: "POST", body: { template_id: +$("#reinstall-tpl").value } });
+    const body = { template_id: +$("#reinstall-tpl").value };
+    if (appSel) {
+      body.app = appSel.value;
+      body.app_params = {};
+      $$("#reinstall-app-fields [data-env]").forEach((el) => { body.app_params[el.dataset.env] = el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value.trim(); });
+    }
+    const r = await api(`/api/guests/${g.id}/reinstall`, { method: "POST", body });
     showSecret("Neues root-Passwort", "Nach der Neuinstallation gilt dieses Passwort:", r.password);
     watchTask(r.task_id, "Neu installieren");
   };
@@ -1366,15 +1543,15 @@ async function guestSettings(g, shell) {
 
 async function viewCreate() {
   const admin = S.me.role === "admin";
-  const [templates, nodes, pools, me, users, storages] = await Promise.all([
+  const [templates, nodes, pools, me, users, storages, appList] = await Promise.all([
     api("/api/templates"), api("/api/nodes"), api("/api/pools"), api("/api/me"), admin ? api("/api/users/brief") : [],
-    api("/api/storages").catch(() => []),
+    api("/api/storages").catch(() => []), api("/api/apps").catch(() => []),
   ]);
   const q = me.quota, u = me.usage;
   const free = admin ? { cores: 64, memory_mb: 262144, disk_gb: 4096 }
     : { cores: q.cores - u.cores, memory_mb: q.memory_mb - u.memory_mb, disk_gb: q.disk_gb - u.disk_gb };
   const blocked = !admin && (u.guests >= q.guests || free.cores < 1 || free.memory_mb < 256 || free.disk_gb < 2);
-  const C = { type: "kvm", template: null, iso: null, isoList: null, name: "", hostname: "", manualHost: false };
+  const C = { type: "kvm", template: null, iso: null, isoList: null, name: "", hostname: "", manualHost: false, app: null };
 
   const onlineNodes = nodes.filter((n) => n.status === "online");
   const nodeOptions = `<option value="auto">Automatisch (Node mit dem meisten freien RAM)</option>` + (admin ? onlineNodes.map((n) =>
@@ -1399,6 +1576,8 @@ async function viewCreate() {
             <div id="kvm-warn"></div>
             <div class="os-grid" id="os-grid"></div>
             <div id="iso-pick"></div>
+            ${appList.length ? `<div class="app-section"><h3>Anwendung mitinstallieren <span class="muted small">(optional)</span></h3>
+              <div class="app-grid" id="app-grid"></div><div id="app-fields"></div></div>` : ""}
           </div></div>
 
         <div class="card"><div class="card-head"><span class="step-num">2</span><h2>Ressourcen</h2></div><div class="card-body">
@@ -1456,6 +1635,7 @@ async function viewCreate() {
     if (!C.iso && !list.some((t) => t.id === (C.template && C.template.id))) C.template = list[0] || null;
     $$(".os-card").forEach((b) => b.classList.toggle("active", C.iso ? b.dataset.tpl === "iso" : C.template && +b.dataset.tpl === C.template.id));
     renderIsoPick();
+    renderApps();
     $("#type-hint").textContent = C.type === "kvm"
       ? "Vollwertige virtuelle Maschine mit eigenem Kernel – ideal für alles, inkl. Docker und eigene Kernelmodule."
       : "Leichtgewichtiger Linux-Container – startet in Sekunden und braucht kaum Overhead.";
@@ -1475,6 +1655,55 @@ async function viewCreate() {
       box.innerHTML = "";
     }
   };
+  const renderApps = () => {
+    const grid = $("#app-grid");
+    if (!grid) return;
+    if (C.app && (!C.app.types.includes(C.type) || C.iso)) C.app = null;
+    grid.innerHTML = `<button type="button" class="app-card ${C.app ? "" : "active"}" data-app=""><div class="t">Keine</div><div class="s">nur das Betriebssystem</div></button>`
+      + appList.map((a) => {
+        const ok = a.types.includes(C.type) && !C.iso;
+        return `<button type="button" class="app-card ${C.app && C.app.id === a.id ? "active" : ""}" data-app="${esc(a.id)}" ${ok ? "" : "disabled"}
+          title="${esc(ok ? a.description : C.iso ? "Nicht mit eigener ISO" : "Nur als virtuelle Maschine (braucht Docker bzw. eigenen Kernel)")}">
+          <div class="t">${esc(a.name)}</div><div class="s">${esc(a.category)}${ok ? "" : " · nur VM"}</div></button>`;
+      }).join("");
+    renderAppFields();
+  };
+  const renderAppFields = () => {
+    const box = $("#app-fields");
+    if (!box) return;
+    const a = C.app;
+    if (!a) { box.innerHTML = ""; return; }
+    const m = a.min;
+    box.innerHTML = `<p class="muted small" style="margin:10px 0">${esc(a.description)} Mindestens ${m.cores} CPU · ${fmtMB(m.memory_mb)} RAM · ${m.disk_gb} GB.
+      Die Installation läuft nach dem Start im Hintergrund – Fortschritt und Zugangsdaten stehen danach in der Übersicht des Servers.</p>`
+      + (a.fields.length ? `<div class="row" style="flex-wrap:wrap">${a.fields.map((f) => f.kind === "bool"
+        ? `<label class="check" style="flex-basis:100%"><input type="checkbox" name="app_${f.env}" ${f.default === "1" ? "checked" : ""}><span>${esc(f.label)}</span></label>`
+        : `<label class="field" style="min-width:220px"><span>${esc(f.label)}${f.required ? "" : " <span class='muted'>(optional)</span>"}</span>
+            <input type="text" name="app_${f.env}" value="${esc(f.default || "")}" placeholder="${esc(f.hint || "")}" autocomplete="off"></label>`).join("")}</div>` : "");
+  };
+  const ensureMin = () => {
+    if (!C.app) return;
+    const short = [];
+    [["cores", C.app.min.cores], ["memory_mb", C.app.min.memory_mb], ["disk_gb", C.app.min.disk_gb]].forEach(([n, v]) => {
+      const max = +form[n].max;
+      if (+form[n].value < v) {
+        form[n].value = Math.min(v, max);
+        form[`${n}-range`].value = form[n].value;
+      }
+      if (max < v) short.push(n);
+    });
+    if (short.length) toast(`${C.app.name} braucht mehr Ressourcen, als dein Kontingent erlaubt`, "bad");
+  };
+  const appGrid = $("#app-grid");
+  if (appGrid) appGrid.addEventListener("click", (e) => {
+    const b = e.target.closest(".app-card");
+    if (!b || b.disabled) return;
+    C.app = appList.find((a) => a.id === b.dataset.app) || null;
+    $$(".app-card").forEach((x) => x.classList.toggle("active", x === b));
+    renderAppFields();
+    ensureMin();
+    update();
+  });
   const update = () => {
     kvmWarning();
     const f = form;
@@ -1487,6 +1716,7 @@ async function viewCreate() {
     $("#summary").innerHTML = `
       <div class="sum-line"><span class="k">Typ</span><span class="v">${C.type === "kvm" ? "Virtuelle Maschine" : "Container"}</span></div>
       <div class="sum-line"><span class="k">System</span><span class="v">${esc(C.iso ? `ISO: ${C.iso.file || "–"}` : t ? t.name : "–")}</span></div>
+      ${C.app ? `<div class="sum-line"><span class="k">Anwendung</span><span class="v">${esc(C.app.name)}</span></div>` : ""}
       <div class="sum-line"><span class="k">CPU</span><span class="v">${f.cores.value} ${+f.cores.value === 1 ? "Kern" : "Kerne"}</span></div>
       <div class="sum-line"><span class="k">RAM</span><span class="v">${fmtMB(+f.memory_mb.value)}</span></div>
       <div class="sum-line"><span class="k">Speicher</span><span class="v">${f.disk_gb.value} GB</span></div>
@@ -1534,11 +1764,13 @@ async function viewCreate() {
       C.template = null;
       $$(".os-card").forEach((x) => x.classList.toggle("active", x === b));
       renderIsoPick();
+      renderApps();
       update();
       return;
     }
     C.iso = null;
     renderIsoPick();
+    renderApps();
     C.template = templates.find((t) => t.id === +b.dataset.tpl);
     $$(".os-card").forEach((x) => x.classList.toggle("active", x === b));
     update();
@@ -1576,6 +1808,14 @@ async function viewCreate() {
     };
     if (form.owner_id) body.owner_id = +form.owner_id.value;
     if (form.storage_id && form.storage_id.value) body.storage_id = +form.storage_id.value;
+    if (C.app) {
+      body.app_id = C.app.id;
+      body.app_params = {};
+      C.app.fields.forEach((f) => {
+        const el = form[`app_${f.env}`];
+        if (el) body.app_params[f.env] = f.kind === "bool" ? (el.checked ? "1" : "0") : el.value.trim();
+      });
+    }
     const btn = $("#create-btn");
     btn.disabled = true;
     try {
@@ -2221,9 +2461,10 @@ async function viewSettings(params, m, silent, seq) {
   const tab = m[1] || "general";
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["update", "Updates"]]);
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["update", "Updates"]]);
   if (tab === "cloudflare") return settingsCloudflare(head);
   if (tab === "update") return settingsUpdate(head, silent, seq);
+  if (tab === "branding") return settingsBranding(head);
   if (tab === "backups") return settingsBackupTargets(head);
   if (tab === "storage") return settingsStorages(head);
   if (tab === "domain") return settingsDomain(head);

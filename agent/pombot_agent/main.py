@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import console, firewall, ha, host, images, isos, kvm, lxc, migrate, remote, routed, selfupdate, storage
+from . import apps, clone, console, firewall, ha, host, images, isos, kvm, lxc, migrate, remote, routed, selfupdate, storage
 from .config import ALLOW_FROM, BACKUP_DIR, TOKEN, VERSION
 from .util import JOBS, Busy, CmdError, check_name, check_snap, start_job, try_lock
 
@@ -116,6 +116,17 @@ class UpdateBody(BaseModel):
     tag: str = Field(pattern=r"^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}$")
 
 
+@app.get("/guests/{name}/app", dependencies=[Depends(auth)])
+def guest_app_status(name: str):
+    """Fortschritt der Anwendungs-Installation im Server (Zustand, Log, Zugangsdaten)."""
+    check_name(name)
+    if lxc.exists(name):
+        return apps.status(name, "lxc") if lxc.state(name) == "running" else {"state": "stopped", "log": [], "info": ""}
+    if kvm.exists(name):
+        return apps.status(name, "kvm") if kvm.state(name) == "running" else {"state": "stopped", "log": [], "info": ""}
+    raise HTTPException(404, "Server nicht gefunden")
+
+
 @app.post("/system/update", dependencies=[Depends(auth)])
 def system_update(body: UpdateBody):
     """Agent aktualisiert sich selbst auf die angegebene Version (läuft im Hintergrund weiter)."""
@@ -175,6 +186,8 @@ class CreateSpec(BaseModel):
     storage_id: str | None = Field(default=None, pattern=r"^[0-9]{1,9}$")  # gemeinsamer Speicher
     instance_suffix: str = "1"
     routed: bool = False  # Zusatz-IPs über pbr0 routen statt direkt bridgen
+    app_script: str | None = Field(default=None, max_length=300_000)  # Anwendung nach dem Start installieren
+    onboot: bool = True  # beim Start des Nodes mitstarten
 
 
 @app.get("/guests", dependencies=[Depends(auth)])
@@ -216,6 +229,44 @@ def guest_create(spec: CreateSpec):
             routed.remove_guest(d["name"])
             raise
     return job_response(start_job("create", spec.name, _create, data))
+
+
+class AutostartBody(BaseModel):
+    enabled: bool
+
+
+@app.put("/guests/{name}/autostart", dependencies=[Depends(auth)])
+def guest_autostart(name: str, body: AutostartBody):
+    """Server beim Start des Nodes automatisch mitstarten (an/aus)."""
+    check_name(name)
+    gtype = "lxc" if lxc.exists(name) else "kvm" if kvm.exists(name) else None
+    if not gtype:
+        raise HTTPException(404, "Server nicht gefunden")
+    ha.set_autostart(name, gtype, body.enabled)
+    return {"ok": True, "enabled": body.enabled}
+
+
+@app.post("/guests/{name}/clone", dependencies=[Depends(auth)])
+def guest_clone(name: str, spec: CreateSpec):
+    """Vollständige Kopie von `name` als neuer Server `spec.name` auf diesem Node (Job)."""
+    check_name(name)
+    check_name(spec.name)
+    for ip in spec.ips:
+        ipaddress.ip_address(ip.address)
+    if spec.routed and spec.bridge != routed.BRIDGE:
+        raise HTTPException(400, f"Geroutete Gäste müssen an {routed.BRIDGE} hängen")
+    data = spec.model_dump()
+    data["ips"] = [ip.model_dump() for ip in spec.ips]
+
+    def _clone(job, src, d):
+        if d["routed"]:
+            routed.set_guest(d["name"], [ip["address"] for ip in d["ips"]], job)
+        try:
+            return clone.clone(job, src, d)
+        except Exception:
+            routed.remove_guest(d["name"])
+            raise
+    return job_response(start_job("clone", name, _clone, name, data))
 
 
 @app.get("/guests/{name}", dependencies=[Depends(auth)])
