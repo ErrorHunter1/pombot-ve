@@ -415,7 +415,7 @@ curl -sk -b "$JAR2" "$API/api/me" | json 'd["username"], d["role_name"], d["perm
 [ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$JAR2" "$API/api/nodes/1")" = "200" ] || fail "Node-Verwalter darf keine Nodes sehen"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$JAR2" "$API/api/users")" = "403" ] || fail "Node-Verwalter darf Benutzer sehen"
 [ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$JAR2" "$API/api/admin/settings")" = "403" ] || fail "Node-Verwalter darf Einstellungen sehen"
-curl -sk -X POST -H "X-PomBot: 1" -H "Content-Type: application/json" -d '{"username":"x","password":"Techniker12345"}' \
+curl -sk -X POST -H "X-PomBot: 1" -H "Content-Type: application/json" -d '{"username":"zweiter","password":"Techniker12345"}' \
   "$API/api/invites/public/$INV/accept" | grep -q "bereits verwendet" || fail "Einladung ließ sich zweimal verwenden"
 end
 
