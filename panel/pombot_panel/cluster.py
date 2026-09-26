@@ -24,7 +24,8 @@ from . import ipam
 from .agent_client import AgentClient, AgentError
 from .db import get_db, session_scope
 from .models import Guest, Node, SharedStorage, User, now
-from .security import audit, client_ip, current_user, require_admin
+from .perms import require
+from .security import audit, client_ip, current_user
 
 log = logging.getLogger("pombot.cluster")
 
@@ -74,14 +75,14 @@ def public(s: SharedStorage, db: Session) -> dict:
 
 
 def visible(db: Session, user: User) -> list[SharedStorage]:
-    return [s for s in db.scalars(select(SharedStorage).order_by(SharedStorage.name)) if user.is_admin or s.user_visible]
+    return [s for s in db.scalars(select(SharedStorage).order_by(SharedStorage.name)) if user.can("storage.manage") or s.user_visible]
 
 
 def get_visible(db: Session, user: User, storage_id) -> SharedStorage | None:
     if storage_id in (None, 0, "", "local"):
         return None
     s = db.get(SharedStorage, int(storage_id))
-    if not s or (not user.is_admin and not s.user_visible):
+    if not s or (not user.can("storage.manage") and not s.user_visible):
         raise HTTPException(404, "Speicher nicht gefunden")
     return s
 
@@ -302,12 +303,12 @@ def _clean(body: StorageBody, old: dict | None = None) -> dict:
 
 
 @router.get("")
-def list_storages(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def list_storages(user: User = Depends(require("storage.manage")), db: Session = Depends(get_db)):
     return [public(s, db) for s in db.scalars(select(SharedStorage).order_by(SharedStorage.name))]
 
 
 @router.post("")
-def create_storage(body: StorageBody, request: Request, user: User = Depends(require_admin),
+def create_storage(body: StorageBody, request: Request, user: User = Depends(require("storage.manage")),
                    db: Session = Depends(get_db)):
     if db.scalar(select(SharedStorage).where(SharedStorage.name == body.name.strip())):
         raise HTTPException(400, "Name bereits vergeben")
@@ -322,7 +323,7 @@ def create_storage(body: StorageBody, request: Request, user: User = Depends(req
 
 
 @router.put("/{storage_id}")
-def update_storage(storage_id: int, body: StorageBody, request: Request, user: User = Depends(require_admin),
+def update_storage(storage_id: int, body: StorageBody, request: Request, user: User = Depends(require("storage.manage")),
                    db: Session = Depends(get_db)):
     s = db.get(SharedStorage, storage_id)
     if not s:
@@ -340,7 +341,7 @@ def update_storage(storage_id: int, body: StorageBody, request: Request, user: U
 
 
 @router.delete("/{storage_id}")
-def delete_storage(storage_id: int, request: Request, user: User = Depends(require_admin),
+def delete_storage(storage_id: int, request: Request, user: User = Depends(require("storage.manage")),
                    db: Session = Depends(get_db)):
     s = db.get(SharedStorage, storage_id)
     if not s:
@@ -355,7 +356,7 @@ def delete_storage(storage_id: int, request: Request, user: User = Depends(requi
 
 
 @router.post("/sync")
-def sync_storages(user: User = Depends(require_admin)):
+def sync_storages(user: User = Depends(require("storage.manage"))):
     """Speicher jetzt auf allen Nodes einhängen und Zustand abfragen."""
     return {"errors": sync_all()}
 

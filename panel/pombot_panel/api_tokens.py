@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import get_db
 from .models import ApiToken, User, now
-from .security import audit, client_ip, require_admin
+from .perms import require
+from .security import audit, client_ip
 
 PREFIX = "pbt_"
 MANAGE_PATH = "/api/admin/api"  # Verwaltung – nie per Token
@@ -66,8 +67,8 @@ def user_from_token(request: Request, db: Session, raw: str) -> User:
         register_fail(f"token:{ip}")
         raise HTTPException(401, "Ungültiges oder abgelaufenes API-Token")
     user = db.get(User, token.user_id)
-    if not user or not user.active or not user.is_admin:
-        raise HTTPException(401, "Das Token gehört zu keinem aktiven Administrator mehr")
+    if not user or not user.active or not user.can("api.manage"):
+        raise HTTPException(401, "Das Token gehört zu keinem aktiven Benutzer mit API-Recht mehr")
     path = request.url.path
     if path.startswith(MANAGE_PATH):
         raise HTTPException(403, "Tokens und API-Einstellungen lassen sich nur im Panel verwalten")
@@ -92,9 +93,12 @@ def _token_dict(t: ApiToken, names: dict) -> dict:
 
 
 @router.get("")
-def api_status(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def api_status(user: User = Depends(require("api.manage")), db: Session = Depends(get_db)):
     names = dict(db.execute(select(User.id, User.username)).all())
-    tokens = [_token_dict(t, names) for t in db.scalars(select(ApiToken).order_by(ApiToken.id.desc()))]
+    q = select(ApiToken).order_by(ApiToken.id.desc())
+    if not user.is_admin:
+        q = q.where(ApiToken.user_id == user.id)
+    tokens = [_token_dict(t, names) for t in db.scalars(q)]
     return {"enabled": bool(getattr(settings, "api_enabled", False)), "base_url": settings.base_url, "tokens": tokens}
 
 
@@ -103,7 +107,7 @@ class ToggleBody(BaseModel):
 
 
 @router.put("")
-def api_toggle(body: ToggleBody, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def api_toggle(body: ToggleBody, request: Request, user: User = Depends(require("api.manage")), db: Session = Depends(get_db)):
     from . import runtime
     runtime.save(db, {"api_enabled": body.enabled})
     audit(db, user, "api-toggle", "REST-API " + ("eingeschaltet" if body.enabled else "ausgeschaltet"), client_ip(request))
@@ -118,7 +122,7 @@ class TokenBody(BaseModel):
 
 
 @router.post("/tokens")
-def token_create(body: TokenBody, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def token_create(body: TokenBody, request: Request, user: User = Depends(require("api.manage")), db: Session = Depends(get_db)):
     raw = PREFIX + secrets.token_urlsafe(32)
     t = ApiToken(name=body.name.strip(), user_id=user.id, token_hash=hash_token(raw), prefix=raw[:10],
                  read_only=body.read_only,
@@ -130,9 +134,9 @@ def token_create(body: TokenBody, request: Request, user: User = Depends(require
 
 
 @router.delete("/tokens/{token_id}")
-def token_delete(token_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def token_delete(token_id: int, request: Request, user: User = Depends(require("api.manage")), db: Session = Depends(get_db)):
     t = db.get(ApiToken, token_id)
-    if not t:
+    if not t or (not user.is_admin and t.user_id != user.id):
         raise HTTPException(404, "Token nicht gefunden")
     audit(db, user, "api-token-delete", t.name, client_ip(request))
     db.delete(t)
@@ -141,7 +145,7 @@ def token_delete(token_id: int, request: Request, user: User = Depends(require_a
 
 
 @router.get("/openapi.json")
-def openapi_spec(request: Request, user: User = Depends(require_admin)):
+def openapi_spec(request: Request, user: User = Depends(require("api.manage"))):
     """OpenAPI-Beschreibung aller REST-Endpunkte (für die Dokumentation im Panel)."""
     import copy
     from .api_docs import apply

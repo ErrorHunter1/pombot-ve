@@ -404,6 +404,21 @@ api PUT /api/admin/api '{"enabled":false}' >/dev/null
 tapi "$RW" GET /api/me | grep -q "deaktiviert" || fail "Ausgeschaltete API akzeptiert Tokens"
 end
 
+step "Rollen, Rechte und Einladungen"
+ROLE="$(api POST /api/roles '{"name":"Node-Verwalter","permissions":["nodes.manage","pools.manage"]}' | json 'd["key"]')"
+INV="$(api POST /api/invites "{\"role\":\"$ROLE\",\"login_methods\":\"password\",\"expires_days\":1}" | json 'd["url"].split("/invite/")[1]')"
+JAR2="$(mktemp)"
+curl -sk -b "$JAR2" -c "$JAR2" "$API/api/invites/public/$INV" | json 'd["role_name"]' | grep -q "Node-Verwalter" || fail "Einladung nicht abrufbar"
+curl -sk -b "$JAR2" -c "$JAR2" -X POST -H "X-PomBot: 1" -H "Content-Type: application/json" \
+  -d '{"username":"techniker","password":"Techniker12345"}' "$API/api/invites/public/$INV/accept" | grep -q ok || fail "Einladung ließ sich nicht annehmen"
+curl -sk -b "$JAR2" "$API/api/me" | json 'd["username"], d["role_name"], d["permissions"]'
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$JAR2" "$API/api/nodes/1")" = "200" ] || fail "Node-Verwalter darf keine Nodes sehen"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$JAR2" "$API/api/users")" = "403" ] || fail "Node-Verwalter darf Benutzer sehen"
+[ "$(curl -sk -o /dev/null -w '%{http_code}' -b "$JAR2" "$API/api/admin/settings")" = "403" ] || fail "Node-Verwalter darf Einstellungen sehen"
+curl -sk -X POST -H "X-PomBot: 1" -H "Content-Type: application/json" -d '{"username":"x","password":"Techniker12345"}' \
+  "$API/api/invites/public/$INV/accept" | grep -q "bereits verwendet" || fail "Einladung ließ sich zweimal verwenden"
+end
+
 step "Konfiguration exportieren"
 api GET /api/admin/export > /tmp/export.json
 json 'sorted(k for k in d if k in ("settings","nodes","pools","templates","users","guests"))' < /tmp/export.json

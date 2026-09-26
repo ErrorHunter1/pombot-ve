@@ -217,7 +217,16 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
   Portbereiche, Quell-/Zielnetze, Standardaktion, Vorlagen für SSH/Web/Ping/DNS/Mail
 - **Spoofing-Schutz**: Server können nur mit ihren eigenen IP-Adressen senden (standardmäßig immer aktiv)
 - **Neu installieren** mit gleicher IP, **root-Passwort zurücksetzen**
-- **Benutzer:** Admin/Benutzer, Kontingente (Server, CPU, RAM, Speicher, IPs), Freischaltung, lokale Konten
+- **Benutzer, Rollen & Einladungen** (Menü Benutzer):
+  - **Rollen mit Rechten:** eingebaut sind *Administrator* (alles) und *Benutzer* (eigene Server im Kontingent);
+    eigene Rollen bekommen einzelne Rechte, z. B. „Node-Verwalter“ mit `nodes.manage` und `pools.manage`.
+    Rechte: `guests.all`, `quota.unlimited`, `nodes.manage`, `pools.manage`, `templates.manage`, `storage.manage`,
+    `users.manage`, `settings.manage`, `api.manage`, `config.export`, `updates.manage`, `audit.view`.
+    Wer Benutzer verwalten darf, aber kein Admin ist, kann nur Rollen vergeben, deren Rechte er selbst hat.
+  - **Einladungen:** Link mit Rolle, Anmeldeart, Kontingent und Ablaufdatum; der Eingeladene legt sein Konto selbst
+    an (Benutzername + Passwort und/oder Discord) – auch bei geschlossener Registrierung. Jeder Link gilt einmal.
+  - **Anmeldeart pro Benutzer:** E-Mail/Passwort, nur Discord oder beides.
+  - Kontingente (Server, CPU, RAM, Speicher, IPs), Freischaltung, lokale Konten
 - **Aufgaben** mit Live-Log, **Audit-Protokoll** aller Aktionen
 - **Bedienung:** Schnellsuche mit <kbd>Strg</kbd>+<kbd>K</kbd> (Server, Nodes, Seiten, Aktionen), Tastenkürzel
   (<kbd>/</kbd> Suchen, <kbd>c</kbd> Server erstellen, <kbd>g</kbd> <kbd>s</kbd> Server …, <kbd>?</kbd> Übersicht), sortierbare

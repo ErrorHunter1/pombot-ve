@@ -42,7 +42,7 @@ def quota(user: User) -> dict:
 
 def check_quota(db: Session, user: User, guests=0, cores=0, memory_mb=0, disk_gb=0, ips=0,
                 exclude_guest: int | None = None) -> None:
-    if user.is_admin:
+    if user.can("quota.unlimited"):
         return
     used = usage(db, user, exclude_guest)
     limits = quota(user)
@@ -80,7 +80,7 @@ def pool_fits_node(pool: IPPool, node: Node) -> bool:
 def usable_pools(db: Session, user: User, node: Node, version: int) -> list[IPPool]:
     pools = []
     for pool in db.scalars(select(IPPool).order_by(IPPool.id)):
-        if pool.admin_only and not user.is_admin:
+        if pool.admin_only and not user.can("quota.unlimited"):
             continue
         if ipam.version_of(pool) == version and pool_fits_node(pool, node):
             pools.append(pool)
@@ -101,7 +101,7 @@ def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choic
         node = db.get(Node, int(node_choice))
         if not node:
             raise HTTPException(400, "Node nicht gefunden")
-        if not user.is_admin and not node.enabled:
+        if not (user.can("quota.unlimited") or user.can("nodes.manage")) and not node.enabled:
             raise HTTPException(400, "Dieser Node nimmt keine neuen Server an")
         if node.status != "online":
             raise HTTPException(400, f"Node {node.name} ist nicht online")
@@ -120,7 +120,7 @@ def resolve_placement(db: Session, user: User, gtype: str, node_choice, v4_choic
                     return pool
             raise LookupError
         pool = db.get(IPPool, int(choice))
-        if not pool or (pool.admin_only and not user.is_admin):
+        if not pool or (pool.admin_only and not user.can("quota.unlimited")):
             raise HTTPException(400, "IP-Pool nicht gefunden")
         if ipam.version_of(pool) != version:
             raise HTTPException(400, f"Pool {pool.name} ist kein IPv{version}-Pool")

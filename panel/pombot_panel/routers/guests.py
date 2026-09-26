@@ -76,7 +76,7 @@ def _keys(raw: str | None) -> list[str]:
 @router.get("")
 def list_guests(user: User = Depends(current_user), db: Session = Depends(get_db), all: bool = False):
     q = select(Guest).order_by(Guest.vmid)
-    if not (user.is_admin and all):
+    if not (user.can("guests.all") and all):
         q = q.where(Guest.owner_id == user.id)
     return [guest_dict(g) for g in db.scalars(q)]
 
@@ -138,7 +138,7 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
         gtype = "kvm"
     else:
         template = db.get(Template, body.template_id) if body.template_id else None
-        if not template or (not template.enabled and not user.is_admin):
+        if not template or (not template.enabled and not user.can("quota.unlimited")):
             raise HTTPException(400, "Vorlage nicht gefunden")
         if body.disk_gb < template.min_disk_gb:
             raise HTTPException(400, f"Diese Vorlage braucht mindestens {template.min_disk_gb} GB Speicher")
@@ -149,8 +149,8 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
         raise HTTPException(400, "Das Passwort muss mindestens 8 Zeichen lang sein")
     owner = user
     if body.owner_id and body.owner_id != user.id:
-        if not user.is_admin:
-            raise HTTPException(403, "Nur Administratoren können Server für andere anlegen")
+        if not user.can("guests.all"):
+            raise HTTPException(403, "Keine Berechtigung, Server für andere anzulegen")
         owner = db.get(User, body.owner_id)
         if not owner:
             raise HTTPException(400, "Besitzer nicht gefunden")
@@ -162,7 +162,7 @@ def create_guest(body: CreateBody, request: Request, user: User = Depends(curren
                                body.hostname) if app else {}
 
     with ipam.alloc_lock:
-        node, v4, v6 = ops.resolve_placement(db, owner if not user.is_admin else user, gtype,
+        node, v4, v6 = ops.resolve_placement(db, user if user.can("quota.unlimited") else owner, gtype,
                                              body.node, body.ipv4_pool, body.ipv6_pool,
                                              storage.id if storage else None)
         pools = [p for p in (v4, v6) if p]
@@ -219,8 +219,8 @@ def patch_guest(guest_id: int, body: PatchBody, request: Request, user: User = D
     if body.notes is not None:
         g.notes = body.notes
     if body.owner_id is not None and body.owner_id != g.owner_id:
-        if not user.is_admin:
-            raise HTTPException(403, "Nur Administratoren können den Besitzer ändern")
+        if not user.can("guests.all"):
+            raise HTTPException(403, "Keine Berechtigung, den Besitzer zu ändern")
         if not db.get(User, body.owner_id):
             raise HTTPException(400, "Benutzer nicht gefunden")
         audit(db, user, "guest-owner", f"#{g.vmid} -> Benutzer {body.owner_id}", client_ip(request))
@@ -246,8 +246,8 @@ def patch_guest(guest_id: int, body: PatchBody, request: Request, user: User = D
         _call(lambda: _agent(g).request("PUT", f"/guests/{g.agent_name}/autostart", {"enabled": body.onboot}, timeout=30))
         g.onboot = body.onboot
     if body.ha is not None and body.ha != g.ha:
-        if not user.is_admin:
-            raise HTTPException(403, "Nur Administratoren können HA ein- oder ausschalten")
+        if not user.can("guests.all"):
+            raise HTTPException(403, "Keine Berechtigung, HA zu ändern")
         if body.ha and not g.storage_id:
             raise HTTPException(400, "HA geht nur für Server auf gemeinsamem Speicher")
         g.ha = body.ha
@@ -342,7 +342,7 @@ class NetworkBody(BaseModel):
 def _pick(db: Session, user: User, g: Guest, version: int, choice, address: str | None, node: Node | None = None):
     """Liefert (Pool, Adresse) für eine neue IP. Wirft HTTPException bei ungültiger Wahl."""
     pool = db.get(IPPool, int(choice)) if str(choice).isdigit() else None
-    if not pool or (pool.admin_only and not user.is_admin):
+    if not pool or (pool.admin_only and not user.can("quota.unlimited")):
         raise HTTPException(400, "IP-Pool nicht gefunden")
     if ipam.version_of(pool) != version:
         raise HTTPException(400, f"{pool.name} ist kein IPv{version}-Pool")
@@ -374,7 +374,7 @@ def change_network(guest_id: int, body: NetworkBody, request: Request, user: Use
     """IP-Adressen tauschen, Pool wechseln (auch geroutet <-> Bridge) und MAC ändern.
     Neue Adressen werden sofort reserviert, alte erst nach erfolgreichem Umbau freigegeben."""
     g = guest_for(db, user, guest_id)
-    if body.mac and not user.is_admin:
+    if body.mac and not user.can("guests.all"):
         raise HTTPException(403, "Nur Administratoren können die MAC-Adresse ändern")
     mac = ipam.normalize_mac(body.mac) if body.mac else None
     _ensure_ready(g)
@@ -494,8 +494,8 @@ class MigrateBody(BaseModel):
 @router.get("/{guest_id}/migrate/check")
 def migrate_check(guest_id: int, node_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """Welche IPs auf dem Ziel-Node weiterverwendet werden können."""
-    if not user.is_admin:
-        raise HTTPException(403, "Nur Administratoren können Server umziehen")
+    if not user.can("guests.all"):
+        raise HTTPException(403, "Keine Berechtigung, Server umzuziehen")
     g = guest_for(db, user, guest_id)
     node = db.get(Node, node_id)
     if not node:
@@ -509,8 +509,8 @@ def migrate_check(guest_id: int, node_id: int, user: User = Depends(current_user
 @router.post("/{guest_id}/migrate")
 def migrate_guest(guest_id: int, body: MigrateBody, request: Request, user: User = Depends(current_user),
                   db: Session = Depends(get_db)):
-    if not user.is_admin:
-        raise HTTPException(403, "Nur Administratoren können Server umziehen")
+    if not user.can("guests.all"):
+        raise HTTPException(403, "Keine Berechtigung, Server umzuziehen")
     g = guest_for(db, user, guest_id)
     _ensure_ready(g)
     target = db.get(Node, body.node_id)
@@ -606,7 +606,7 @@ def clone_guest(guest_id: int, body: CloneBody, request: Request, user: User = D
     password = body.password or generate_password()
     keys = _keys(owner.ssh_keys)
     with ipam.alloc_lock:
-        node, v4, v6 = ops.resolve_placement(db, user if user.is_admin else owner, src.type, src.node_id,
+        node, v4, v6 = ops.resolve_placement(db, user if user.can("quota.unlimited") else owner, src.type, src.node_id,
                                              v4_choice, v6_choice, src.storage_id)
         pools = [p for p in (v4, v6) if p]
         ops.check_quota(db, owner, guests=1, cores=src.cores, memory_mb=src.memory_mb, disk_gb=src.disk_gb,
@@ -659,7 +659,7 @@ def reinstall_guest(guest_id: int, body: ReinstallBody, request: Request, user: 
         raise HTTPException(400, "Löschschutz ist aktiv – Neuinstallation nicht möglich")
     if body.template_id:
         tpl = db.get(Template, body.template_id)
-        if not tpl or (not tpl.enabled and not user.is_admin):
+        if not tpl or (not tpl.enabled and not user.can("quota.unlimited")):
             raise HTTPException(400, "Vorlage nicht gefunden")
         if tpl.type != g.type:
             raise HTTPException(400, "Die Vorlage muss vom selben Typ sein (VM bzw. Container)")
@@ -692,8 +692,8 @@ def delete_guest(guest_id: int, request: Request, force: bool = False, user: Use
     g = guest_for(db, user, guest_id)
     if g.protected:
         raise HTTPException(400, "Löschschutz ist aktiv – erst in den Einstellungen des Servers ausschalten")
-    if force and not user.is_admin:
-        raise HTTPException(403, "Erzwungenes Löschen nur für Administratoren")
+    if force and not user.can("guests.all"):
+        raise HTTPException(403, "Keine Berechtigung für erzwungenes Löschen")
     if g.status in ("creating", "deleting") and not force:
         raise HTTPException(409, "Der Server ist gerade beschäftigt")
     task = create_task(db, user.id, "delete", f"{g.name} (#{g.vmid})", g.node_id, g.id)
@@ -721,7 +721,7 @@ def create_snapshot(guest_id: int, body: SnapshotBody, request: Request, user: U
                     db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
     _ensure_ready(g)
-    if not user.is_admin:
+    if not user.can("quota.unlimited"):
         existing = _call(lambda: _agent(g).request("GET", f"/guests/{g.agent_name}/snapshots"))
         if len(existing) >= USER_SNAPSHOT_LIMIT:
             raise HTTPException(400, f"Maximal {USER_SNAPSHOT_LIMIT} Snapshots pro Server")
@@ -809,7 +809,7 @@ def create_backup(guest_id: int, request: Request, body: BackupBody | None = Non
     g = guest_for(db, user, guest_id)
     _ensure_ready(g)
     target = backup_targets.get_visible(db, user, body.target_id)
-    if not user.is_admin:
+    if not user.can("quota.unlimited"):
         existing = list_backups(guest_id, user, db)["items"]
         if len([b for b in existing if not b.get("auto")]) >= USER_BACKUP_LIMIT:
             raise HTTPException(400, f"Maximal {USER_BACKUP_LIMIT} manuelle Backups pro Server – bitte alte löschen")
@@ -927,7 +927,7 @@ async def guest_console(ws: WebSocket, guest_id: int):
     with SessionLocal() as db:
         user = ws_user(ws, db)
         g = db.get(Guest, guest_id)
-        if not user or not g or (not user.is_admin and g.owner_id != user.id):
+        if not user or not g or (not user.can("guests.all") and g.owner_id != user.id):
             await ws.close(code=4403)
             return
         client, name = AgentClient.for_node(g.node), g.agent_name

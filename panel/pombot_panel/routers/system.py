@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from .. import ops
 from ..db import get_db
 from ..models import AuditLog, Guest, IPPool, Node, Task, Template, User
-from ..security import audit, client_ip, current_user, require_admin
+from ..perms import require
+from ..security import audit, client_ip, current_user
 from ..tasks import NODE_STATS
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -50,7 +51,7 @@ def template_dict(t: Template) -> dict:
 @router.get("/templates")
 def list_templates(user: User = Depends(current_user), db: Session = Depends(get_db)):
     q = select(Template).order_by(Template.sort, Template.name)
-    return [template_dict(t) for t in db.scalars(q) if t.enabled or user.is_admin]
+    return [template_dict(t) for t in db.scalars(q) if t.enabled or user.can("templates.manage") or user.can("quota.unlimited")]
 
 
 class TemplateBody(BaseModel):
@@ -77,7 +78,7 @@ def _check_template(body: TemplateBody) -> None:
 
 
 @router.post("/templates")
-def create_template(body: TemplateBody, request: Request, user: User = Depends(require_admin),
+def create_template(body: TemplateBody, request: Request, user: User = Depends(require("templates.manage")),
                     db: Session = Depends(get_db)):
     _check_template(body)
     t = Template(**body.model_dump())
@@ -88,7 +89,7 @@ def create_template(body: TemplateBody, request: Request, user: User = Depends(r
 
 
 @router.put("/templates/{template_id}")
-def update_template(template_id: int, body: TemplateBody, request: Request, user: User = Depends(require_admin),
+def update_template(template_id: int, body: TemplateBody, request: Request, user: User = Depends(require("templates.manage")),
                     db: Session = Depends(get_db)):
     t = db.get(Template, template_id)
     if not t:
@@ -102,7 +103,7 @@ def update_template(template_id: int, body: TemplateBody, request: Request, user
 
 
 @router.delete("/templates/{template_id}")
-def delete_template(template_id: int, request: Request, user: User = Depends(require_admin),
+def delete_template(template_id: int, request: Request, user: User = Depends(require("templates.manage")),
                     db: Session = Depends(get_db)):
     t = db.get(Template, template_id)
     if not t:
@@ -129,7 +130,7 @@ def task_dict(t: Task, with_log: bool = False) -> dict:
 def list_tasks(limit: int = 100, guest_id: int | None = None, user: User = Depends(current_user),
                db: Session = Depends(get_db)):
     q = select(Task).order_by(Task.id.desc()).limit(min(limit, 500))
-    if not user.is_admin:
+    if not (user.can("audit.view") or user.can("guests.all")):
         q = q.where(Task.user_id == user.id)
     if guest_id:
         q = q.where(Task.guest_id == guest_id)
@@ -140,13 +141,13 @@ def list_tasks(limit: int = 100, guest_id: int | None = None, user: User = Depen
 @router.get("/tasks/{task_id}")
 def get_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     t = db.get(Task, task_id)
-    if not t or (not user.is_admin and t.user_id != user.id):
+    if not t or (not (user.can("audit.view") or user.can("guests.all")) and t.user_id != user.id):
         raise HTTPException(404, "Aufgabe nicht gefunden")
     return task_dict(t, with_log=True)
 
 
 @router.get("/audit")
-def audit_log(limit: int = 200, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def audit_log(limit: int = 200, user: User = Depends(require("audit.view")), db: Session = Depends(get_db)):
     q = select(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 1000))
     return [{"id": a.id, "username": a.username, "action": a.action, "detail": a.detail, "ip": a.ip,
              "created_at": a.created_at.isoformat() + "Z"} for a in db.scalars(q)]
@@ -161,7 +162,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
         "my": {"total": len(mine), "running": sum(g.power == "running" for g in mine),
                "quota": ops.quota(user), "usage": ops.usage(db, user)},
     }
-    if user.is_admin:
+    if user.can("nodes.manage"):
         nodes = list(db.scalars(select(Node)))
         cluster = {"cpu_cores": 0, "memory_total": 0, "memory_used": 0, "disk_total": 0, "disk_used": 0,
                    "cpu_weighted": 0.0}

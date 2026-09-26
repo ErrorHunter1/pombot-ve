@@ -13,7 +13,8 @@ from .. import ops
 from ..agent_client import AgentClient, AgentError, cert_fingerprint
 from ..db import SessionLocal, get_db
 from ..models import Guest, Node, User
-from ..security import audit, client_ip, current_user, require_admin
+from ..perms import require
+from ..security import audit, client_ip, current_user
 from ..tasks import NODE_HISTORY, NODE_STATS, agent_job, create_task, run_task, submit
 from .guests import proxy_websocket, same_origin, ws_user
 
@@ -43,11 +44,12 @@ def node_dict(n: Node, admin: bool) -> dict:
 @router.get("")
 def list_nodes(user: User = Depends(current_user), db: Session = Depends(get_db)):
     nodes = db.scalars(select(Node).order_by(Node.name))
-    return [node_dict(n, user.is_admin) for n in nodes if user.is_admin or n.enabled]
+    full = user.can("nodes.manage")
+    return [node_dict(n, full) for n in nodes if full or n.enabled or user.can("quota.unlimited")]
 
 
 @router.get("/{node_id}")
-def get_node(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def get_node(node_id: int, user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     node = db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node nicht gefunden")
@@ -70,7 +72,7 @@ class SSHBody(BaseModel):
 
 
 @router.post("/ssh")
-def add_node_ssh(body: SSHBody, request: Request, user: User = Depends(require_admin),
+def add_node_ssh(body: SSHBody, request: Request, user: User = Depends(require("nodes.manage")),
                  db: Session = Depends(get_db)):
     if not body.password and not body.private_key:
         raise HTTPException(400, "Bitte Passwort oder privaten SSH-Schlüssel angeben")
@@ -91,7 +93,7 @@ class JoinBody(BaseModel):
 
 
 @router.post("/join")
-def add_node_join(body: JoinBody, request: Request, user: User = Depends(require_admin),
+def add_node_join(body: JoinBody, request: Request, user: User = Depends(require("nodes.manage")),
                   db: Session = Depends(get_db)):
     data = ops.decode_join(body.join_code)
     name = body.name or data.get("name") or data["host"]
@@ -112,7 +114,7 @@ class NodePatch(BaseModel):
 
 
 @router.patch("/{node_id}")
-def patch_node(node_id: int, body: NodePatch, request: Request, user: User = Depends(require_admin),
+def patch_node(node_id: int, body: NodePatch, request: Request, user: User = Depends(require("nodes.manage")),
                db: Session = Depends(get_db)):
     node = db.get(Node, node_id)
     if not node:
@@ -127,7 +129,7 @@ def patch_node(node_id: int, body: NodePatch, request: Request, user: User = Dep
 
 
 @router.post("/{node_id}/refresh")
-def refresh_node(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def refresh_node(node_id: int, user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     node = db.get(Node, node_id)
     if not node:
         raise HTTPException(404, "Node nicht gefunden")
@@ -143,7 +145,7 @@ def refresh_node(node_id: int, user: User = Depends(require_admin), db: Session 
 
 
 @router.delete("/{node_id}")
-def delete_node(node_id: int, request: Request, user: User = Depends(require_admin),
+def delete_node(node_id: int, request: Request, user: User = Depends(require("nodes.manage")),
                 db: Session = Depends(get_db)):
     node = db.get(Node, node_id)
     if not node:
@@ -166,7 +168,7 @@ def _node_client(db: Session, node_id: int) -> AgentClient:
 
 
 @router.get("/{node_id}/images")
-def node_images(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def node_images(node_id: int, user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     try:
         return _node_client(db, node_id).request("GET", "/images")
     except AgentError as exc:
@@ -174,7 +176,7 @@ def node_images(node_id: int, user: User = Depends(require_admin), db: Session =
 
 
 @router.delete("/{node_id}/images/{image_id}")
-def node_image_delete(node_id: int, image_id: str, user: User = Depends(require_admin),
+def node_image_delete(node_id: int, image_id: str, user: User = Depends(require("nodes.manage")),
                       db: Session = Depends(get_db)):
     try:
         return _node_client(db, node_id).request("DELETE", f"/images/{image_id}")
@@ -183,7 +185,7 @@ def node_image_delete(node_id: int, image_id: str, user: User = Depends(require_
 
 
 @router.get("/{node_id}/network")
-def node_network(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def node_network(node_id: int, user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     """Automatisch erkannte IPv4-Adressen und Gateways des Nodes, inkl. Hinweis, ob schon in einem Pool."""
     from .. import ipam
     from ..models import IPPool
@@ -204,7 +206,7 @@ UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 
 def _iso_client(db: Session, node_id: int, user: User) -> AgentClient:
     node = db.get(Node, node_id)
-    if not node or (not user.is_admin and not node.enabled):
+    if not node or (not (user.can("nodes.manage") or user.can("quota.unlimited")) and not node.enabled):
         raise HTTPException(404, "Node nicht gefunden")
     return AgentClient.for_node(node)
 
@@ -223,7 +225,7 @@ def node_isos(node_id: int, user: User = Depends(current_user), db: Session = De
 
 
 @router.delete("/{node_id}/isos/{name}")
-def node_iso_delete(node_id: int, name: str, request: Request, user: User = Depends(require_admin),
+def node_iso_delete(node_id: int, name: str, request: Request, user: User = Depends(require("nodes.manage")),
                     db: Session = Depends(get_db)):
     in_use = [g for g in db.scalars(select(Guest).where(Guest.node_id == node_id, Guest.iso_file == name))]
     if in_use:
@@ -236,13 +238,13 @@ def node_iso_delete(node_id: int, name: str, request: Request, user: User = Depe
 
 
 @router.post("/{node_id}/isos/uploads")
-def node_iso_upload_start(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def node_iso_upload_start(node_id: int, user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     client = _iso_client(db, node_id, user)
     return _agent_call(lambda: client.request("POST", "/isos/uploads"))
 
 
 @router.get("/{node_id}/isos/uploads/{upload_id}")
-def node_iso_upload_status(node_id: int, upload_id: str, user: User = Depends(require_admin),
+def node_iso_upload_status(node_id: int, upload_id: str, user: User = Depends(require("nodes.manage")),
                            db: Session = Depends(get_db)):
     if not UPLOAD_ID.match(upload_id):
         raise HTTPException(400, "Ungültige Upload-ID")
@@ -252,7 +254,7 @@ def node_iso_upload_status(node_id: int, upload_id: str, user: User = Depends(re
 
 @router.put("/{node_id}/isos/uploads/{upload_id}")
 async def node_iso_upload_chunk(node_id: int, upload_id: str, request: Request, offset: int = 0,
-                                user: User = Depends(require_admin), db: Session = Depends(get_db)):
+                                user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     """Reicht ein Stück der Datei als Datenstrom an den Agent weiter (ohne Zwischenspeicher)."""
     if not UPLOAD_ID.match(upload_id):
         raise HTTPException(400, "Ungültige Upload-ID")
@@ -275,7 +277,7 @@ class IsoFinishBody(BaseModel):
 
 @router.post("/{node_id}/isos/uploads/{upload_id}/finish")
 def node_iso_upload_finish(node_id: int, upload_id: str, body: IsoFinishBody, request: Request,
-                           user: User = Depends(require_admin), db: Session = Depends(get_db)):
+                           user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     if not UPLOAD_ID.match(upload_id):
         raise HTTPException(400, "Ungültige Upload-ID")
     client = _iso_client(db, node_id, user)
@@ -287,7 +289,7 @@ def node_iso_upload_finish(node_id: int, upload_id: str, body: IsoFinishBody, re
 
 
 @router.delete("/{node_id}/isos/uploads/{upload_id}")
-def node_iso_upload_abort(node_id: int, upload_id: str, user: User = Depends(require_admin),
+def node_iso_upload_abort(node_id: int, upload_id: str, user: User = Depends(require("nodes.manage")),
                           db: Session = Depends(get_db)):
     if UPLOAD_ID.match(upload_id):
         client = _iso_client(db, node_id, user)
@@ -301,7 +303,7 @@ class IsoFetchBody(BaseModel):
 
 
 @router.post("/{node_id}/isos/fetch")
-def node_iso_fetch(node_id: int, body: IsoFetchBody, request: Request, user: User = Depends(require_admin),
+def node_iso_fetch(node_id: int, body: IsoFetchBody, request: Request, user: User = Depends(require("nodes.manage")),
                    db: Session = Depends(get_db)):
     client = _iso_client(db, node_id, user)
     task = create_task(db, user.id, "iso-fetch", f"{body.name} ({db.get(Node, node_id).name})", node_id)
@@ -312,7 +314,7 @@ def node_iso_fetch(node_id: int, body: IsoFetchBody, request: Request, user: Use
 
 
 @router.get("/{node_id}/backups")
-def node_backups(node_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def node_backups(node_id: int, user: User = Depends(require("nodes.manage")), db: Session = Depends(get_db)):
     try:
         return _node_client(db, node_id).request("GET", "/backups")
     except AgentError as exc:
@@ -329,7 +331,7 @@ async def node_shell(ws: WebSocket, node_id: int):
     with SessionLocal() as db:
         user = ws_user(ws, db)
         node = db.get(Node, node_id)
-        if not user or not user.is_admin or not node:
+        if not user or not user.can("nodes.manage") or not node:
             await ws.close(code=4403)
             return
         client = AgentClient.for_node(node)

@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from .agent_client import AgentClient, AgentError
 from .db import get_db
 from .models import BackupTarget, Guest, Node, User
-from .security import audit, client_ip, require_admin
+from .perms import require
+from .security import audit, client_ip
 
 FIELDS = {
     "sftp": ["host", "port", "user", "password", "private_key", "path"],
@@ -51,14 +52,14 @@ def subdir(g: Guest) -> str:
 
 def visible(db: Session, user: User) -> list[BackupTarget]:
     q = select(BackupTarget).order_by(BackupTarget.name)
-    return [t for t in db.scalars(q) if user.is_admin or t.user_visible]
+    return [t for t in db.scalars(q) if user.can("storage.manage") or t.user_visible]
 
 
 def get_visible(db: Session, user: User, target_id: int | None) -> BackupTarget | None:
     if target_id in (None, 0, ""):
         return None
     t = db.get(BackupTarget, int(target_id))
-    if not t or (not user.is_admin and not t.user_visible):
+    if not t or (not user.can("storage.manage") and not t.user_visible):
         raise HTTPException(404, "Backup-Speicher nicht gefunden")
     return t
 
@@ -105,12 +106,12 @@ def _clean(body: TargetBody, old: dict | None = None) -> dict:
 
 
 @router.get("")
-def list_targets(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def list_targets(user: User = Depends(require("storage.manage")), db: Session = Depends(get_db)):
     return [public(t) for t in db.scalars(select(BackupTarget).order_by(BackupTarget.name))]
 
 
 @router.post("")
-def create_target(body: TargetBody, request: Request, user: User = Depends(require_admin),
+def create_target(body: TargetBody, request: Request, user: User = Depends(require("storage.manage")),
                   db: Session = Depends(get_db)):
     if db.scalar(select(BackupTarget).where(BackupTarget.name == body.name)):
         raise HTTPException(400, "Name bereits vergeben")
@@ -123,7 +124,7 @@ def create_target(body: TargetBody, request: Request, user: User = Depends(requi
 
 
 @router.put("/{target_id}")
-def update_target(target_id: int, body: TargetBody, request: Request, user: User = Depends(require_admin),
+def update_target(target_id: int, body: TargetBody, request: Request, user: User = Depends(require("storage.manage")),
                   db: Session = Depends(get_db)):
     t = db.get(BackupTarget, target_id)
     if not t:
@@ -136,7 +137,7 @@ def update_target(target_id: int, body: TargetBody, request: Request, user: User
 
 
 @router.delete("/{target_id}")
-def delete_target(target_id: int, request: Request, user: User = Depends(require_admin),
+def delete_target(target_id: int, request: Request, user: User = Depends(require("storage.manage")),
                   db: Session = Depends(get_db)):
     t = db.get(BackupTarget, target_id)
     if not t:
@@ -148,7 +149,7 @@ def delete_target(target_id: int, request: Request, user: User = Depends(require
 
 
 @router.post("/{target_id}/test")
-def test_target(target_id: int, node_id: int | None = None, user: User = Depends(require_admin),
+def test_target(target_id: int, node_id: int | None = None, user: User = Depends(require("storage.manage")),
                 db: Session = Depends(get_db)):
     """Prüft vom gewählten (oder ersten erreichbaren) Node aus: schreiben, lesen, löschen."""
     t = db.get(BackupTarget, target_id)

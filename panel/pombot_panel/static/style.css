@@ -513,3 +513,8 @@ body, .card, .sidebar, .topbar { transition: background-color .25s ease, border-
 
 /* Export */
 .export-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }
+
+/* Rollen */
+.role-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.perm-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px 16px; }
+.perm-tags { display: flex; flex-wrap: wrap; gap: 2px; }

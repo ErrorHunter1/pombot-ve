@@ -13,7 +13,8 @@ from ..cloudflare import RECORD_TYPES, Cloudflare, CloudflareError
 from ..config import settings
 from ..db import get_db, session_scope
 from ..models import User
-from ..security import audit, client_ip, guest_for, require_admin
+from ..perms import require
+from ..security import audit, client_ip, guest_for
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
@@ -36,7 +37,7 @@ def _cf_call(fn):
 # ---------------------------------------------------------------- Einstellungen
 
 @router.get("/settings")
-def get_settings(user: User = Depends(require_admin)):
+def get_settings(user: User = Depends(require("settings.manage"))):
     data = runtime.view()
     data["discord_redirect_uri"] = settings.discord_redirect_uri
     data["base_url"] = settings.base_url
@@ -44,7 +45,7 @@ def get_settings(user: User = Depends(require_admin)):
 
 
 @router.put("/settings")
-def put_settings(body: dict, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def put_settings(body: dict, request: Request, user: User = Depends(require("settings.manage")), db: Session = Depends(get_db)):
     # panel_domain/acme_enabled nur über /domain, api_enabled nur über /api/admin/api (nicht per Token änderbar)
     body = {k: v for k, v in body.items() if k not in ("panel_domain", "acme_enabled", "api_enabled")}
     changed = runtime.save(db, body)
@@ -56,17 +57,17 @@ def put_settings(body: dict, request: Request, user: User = Depends(require_admi
 # ---------------------------------------------------------------- Cloudflare DNS
 
 @router.post("/cloudflare/verify")
-def cf_verify(user: User = Depends(require_admin)):
+def cf_verify(user: User = Depends(require("settings.manage"))):
     return _cf_call(lambda: _cf().verify())
 
 
 @router.get("/cloudflare/zones")
-def cf_zones(user: User = Depends(require_admin)):
+def cf_zones(user: User = Depends(require("settings.manage"))):
     return _cf_call(lambda: _cf().zones())
 
 
 @router.get("/cloudflare/zones/{zone_id}/records")
-def cf_records(zone_id: str, user: User = Depends(require_admin)):
+def cf_records(zone_id: str, user: User = Depends(require("settings.manage"))):
     return _cf_call(lambda: _cf().records(zone_id))
 
 
@@ -97,7 +98,7 @@ def _record(body: RecordBody) -> dict:
 
 
 @router.post("/cloudflare/zones/{zone_id}/records")
-def cf_create(zone_id: str, body: RecordBody, request: Request, user: User = Depends(require_admin),
+def cf_create(zone_id: str, body: RecordBody, request: Request, user: User = Depends(require("settings.manage")),
               db: Session = Depends(get_db)):
     rec = _cf_call(lambda: _cf().create(zone_id, _record(body)))
     audit(db, user, "dns-create", f"{body.type} {body.name} -> {body.content}", client_ip(request))
@@ -106,7 +107,7 @@ def cf_create(zone_id: str, body: RecordBody, request: Request, user: User = Dep
 
 
 @router.put("/cloudflare/zones/{zone_id}/records/{record_id}")
-def cf_update(zone_id: str, record_id: str, body: RecordBody, request: Request, user: User = Depends(require_admin),
+def cf_update(zone_id: str, record_id: str, body: RecordBody, request: Request, user: User = Depends(require("settings.manage")),
               db: Session = Depends(get_db)):
     rec = _cf_call(lambda: _cf().update(zone_id, record_id, _record(body)))
     audit(db, user, "dns-update", f"{body.type} {body.name} -> {body.content}", client_ip(request))
@@ -115,7 +116,7 @@ def cf_update(zone_id: str, record_id: str, body: RecordBody, request: Request, 
 
 
 @router.delete("/cloudflare/zones/{zone_id}/records/{record_id}")
-def cf_delete(zone_id: str, record_id: str, request: Request, user: User = Depends(require_admin),
+def cf_delete(zone_id: str, record_id: str, request: Request, user: User = Depends(require("settings.manage")),
               db: Session = Depends(get_db)):
     _cf_call(lambda: _cf().delete(zone_id, record_id))
     audit(db, user, "dns-delete", record_id, client_ip(request))
@@ -129,7 +130,7 @@ class GuestDnsBody(BaseModel):
 
 
 @router.post("/guests/{guest_id}/dns")
-def guest_dns(guest_id: int, body: GuestDnsBody, request: Request, user: User = Depends(require_admin),
+def guest_dns(guest_id: int, body: GuestDnsBody, request: Request, user: User = Depends(require("settings.manage")),
               db: Session = Depends(get_db)):
     """Legt A/AAAA-Einträge in Cloudflare für die IPs eines Servers an (oder aktualisiert sie)."""
     g = guest_for(db, user, guest_id)
@@ -160,7 +161,7 @@ def _public_ip() -> str | None:
 
 
 @router.get("/domain")
-async def get_domain(user: User = Depends(require_admin)):
+async def get_domain(user: User = Depends(require("settings.manage"))):
     cert = acme.cert_info(runtime.tls_dir() / "fullchain.pem")
     return {
         "base_url": settings.base_url, "port": settings.port, "domain": settings.panel_domain,
@@ -205,7 +206,7 @@ def _setup_domain(task_id: int, body: DomainBody, domain: str) -> None:
 
 
 @router.post("/domain")
-def set_domain(body: DomainBody, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def set_domain(body: DomainBody, request: Request, user: User = Depends(require("settings.manage")), db: Session = Depends(get_db)):
     domain = body.domain.strip().lower().rstrip(".")
     if not DOMAIN_RE.match(domain):
         raise HTTPException(400, "Ungültige Domain, Beispiel: panel.deinedomain.de")
@@ -229,7 +230,7 @@ def set_domain(body: DomainBody, request: Request, user: User = Depends(require_
 
 
 @router.post("/domain/reset")
-def reset_domain(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def reset_domain(request: Request, user: User = Depends(require("settings.manage")), db: Session = Depends(get_db)):
     """Zurück zur Erreichbarkeit per IP mit dem selbstsignierten Zertifikat."""
     runtime.reset_runtime_env()
     runtime.save(db, {"panel_domain": "", "acme_enabled": False})

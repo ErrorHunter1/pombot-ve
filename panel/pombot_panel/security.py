@@ -79,7 +79,7 @@ def require_admin(user: User = Depends(current_user)) -> User:
 
 def guest_for(db: Session, user: User, guest_id: int) -> Guest:
     guest = db.get(Guest, guest_id)
-    if not guest or (not user.is_admin and guest.owner_id != user.id):
+    if not guest or (not user.can("guests.all") and guest.owner_id != user.id):
         raise HTTPException(404, "Server nicht gefunden")
     return guest
 

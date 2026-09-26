@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from .. import ipam
 from ..db import get_db
 from ..models import IPAddress, IPPool, Node, User
-from ..security import audit, client_ip, current_user, require_admin
+from ..perms import require
+from ..security import audit, client_ip, current_user
 
 router = APIRouter(prefix="/api/pools", tags=["pools"])
 
@@ -66,11 +67,11 @@ def _clean(body: PoolBody, db: Session) -> dict:
 @router.get("")
 def list_pools(user: User = Depends(current_user), db: Session = Depends(get_db)):
     pools = db.scalars(select(IPPool).order_by(IPPool.name))
-    return [pool_dict(db, p) for p in pools if user.is_admin or not p.admin_only]
+    return [pool_dict(db, p) for p in pools if user.can("pools.manage") or user.can("quota.unlimited") or not p.admin_only]
 
 
 @router.post("")
-def create_pool(body: PoolBody, request: Request, user: User = Depends(require_admin),
+def create_pool(body: PoolBody, request: Request, user: User = Depends(require("pools.manage")),
                 db: Session = Depends(get_db)):
     if db.scalar(select(IPPool).where(IPPool.name == body.name)):
         raise HTTPException(400, "Name bereits vergeben")
@@ -82,7 +83,7 @@ def create_pool(body: PoolBody, request: Request, user: User = Depends(require_a
 
 
 @router.put("/{pool_id}")
-def update_pool(pool_id: int, body: PoolBody, request: Request, user: User = Depends(require_admin),
+def update_pool(pool_id: int, body: PoolBody, request: Request, user: User = Depends(require("pools.manage")),
                 db: Session = Depends(get_db)):
     pool = db.get(IPPool, pool_id)
     if not pool:
@@ -102,7 +103,7 @@ def update_pool(pool_id: int, body: PoolBody, request: Request, user: User = Dep
 
 
 @router.delete("/{pool_id}")
-def delete_pool(pool_id: int, request: Request, user: User = Depends(require_admin),
+def delete_pool(pool_id: int, request: Request, user: User = Depends(require("pools.manage")),
                 db: Session = Depends(get_db)):
     pool = db.get(IPPool, pool_id)
     if not pool:
@@ -116,7 +117,7 @@ def delete_pool(pool_id: int, request: Request, user: User = Depends(require_adm
 
 
 @router.get("/{pool_id}/addresses")
-def pool_addresses(pool_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def pool_addresses(pool_id: int, user: User = Depends(require("pools.manage")), db: Session = Depends(get_db)):
     pool = db.get(IPPool, pool_id)
     if not pool:
         raise HTTPException(404, "Pool nicht gefunden")
@@ -138,7 +139,7 @@ def free_addresses(pool_id: int, limit: int = 256, user: User = Depends(current_
                    db: Session = Depends(get_db)):
     """Freie Adressen eines Pools (für die Auswahl einer bestimmten IP)."""
     pool = db.get(IPPool, pool_id)
-    if not pool or (pool.admin_only and not user.is_admin):
+    if not pool or (pool.admin_only and not (user.can("pools.manage") or user.can("quota.unlimited"))):
         raise HTTPException(404, "Pool nicht gefunden")
     used = set(db.scalars(select(IPAddress.address).where(IPAddress.pool_id == pool.id)).all())
     macs = ipam.pool_macs(pool)
@@ -157,7 +158,7 @@ class ReserveBody(BaseModel):
 
 
 @router.post("/{pool_id}/reserve")
-def reserve_address(pool_id: int, body: ReserveBody, request: Request, user: User = Depends(require_admin),
+def reserve_address(pool_id: int, body: ReserveBody, request: Request, user: User = Depends(require("pools.manage")),
                     db: Session = Depends(get_db)):
     pool = db.get(IPPool, pool_id)
     if not pool:
@@ -178,7 +179,7 @@ def reserve_address(pool_id: int, body: ReserveBody, request: Request, user: Use
 
 
 @router.delete("/{pool_id}/addresses/{address_id}")
-def release_address(pool_id: int, address_id: int, request: Request, user: User = Depends(require_admin),
+def release_address(pool_id: int, address_id: int, request: Request, user: User = Depends(require("pools.manage")),
                     db: Session = Depends(get_db)):
     addr = db.get(IPAddress, address_id)
     if not addr or addr.pool_id != pool_id:

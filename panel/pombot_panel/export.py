@@ -19,7 +19,8 @@ from .config import settings
 from .db import get_db
 from .models import (ApiToken, BackupSchedule, BackupTarget, FirewallConfig, Guest, IPAddress, IPPool, Node, Setting,
                      SharedStorage, Template, User)
-from .security import audit, client_ip, require_admin
+from .perms import require
+from .security import audit, client_ip
 
 router = APIRouter(prefix="/api/admin/export", tags=["admin"])
 
@@ -118,12 +119,12 @@ def build(db: Session, sections: list[str], secrets: bool) -> dict:
 
 
 @router.get("/sections")
-def export_sections(user: User = Depends(require_admin)):
+def export_sections(user: User = Depends(require("config.export"))):
     return SECTIONS
 
 
 @router.get("")
-def export_config(request: Request, sections: str = "", secrets: bool = False, user: User = Depends(require_admin),
+def export_config(request: Request, sections: str = "", secrets: bool = False, user: User = Depends(require("config.export")),
                   db: Session = Depends(get_db)):
     """Konfiguration als JSON-Datei. `sections`: Komma-Liste (leer = alles), `secrets=true` nur mit Anmeldung im Panel."""
     wanted = [s for s in (sections.split(",") if sections else SECTIONS) if s]

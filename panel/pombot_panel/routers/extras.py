@@ -113,7 +113,7 @@ def put_firewall(guest_id: int, body: FirewallBody, request: Request, user: User
         fw = FirewallConfig(guest_id=g.id, antispoof=settings.antispoof)
         db.add(fw)
     fw.enabled, fw.policy_in, fw.policy_out = body.enabled, body.policy_in, body.policy_out
-    if body.antispoof is not None and user.is_admin:
+    if body.antispoof is not None and user.can("guests.all"):
         fw.antispoof = body.antispoof
     fw.rules_json = json.dumps(rules)
     fw.updated_at = now()
@@ -162,7 +162,7 @@ class ScheduleBody(BaseModel):
 def get_schedule(guest_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
     data = schedule_dict(db.get(BackupSchedule, g.id))
-    data["max_keep"] = 60 if user.is_admin else settings.max_auto_backups
+    data["max_keep"] = 60 if user.can("quota.unlimited") else settings.max_auto_backups
     data["targets"] = [{"id": t.id, "name": t.name, "type": t.type} for t in backup_targets.visible(db, user)]
     return data
 
@@ -171,7 +171,7 @@ def get_schedule(guest_id: int, user: User = Depends(current_user), db: Session 
 def put_schedule(guest_id: int, body: ScheduleBody, request: Request, user: User = Depends(current_user),
                  db: Session = Depends(get_db)):
     g = guest_for(db, user, guest_id)
-    if not user.is_admin and body.keep > settings.max_auto_backups:
+    if not user.can("quota.unlimited") and body.keep > settings.max_auto_backups:
         raise HTTPException(400, f"Es können maximal {settings.max_auto_backups} automatische Backups "
                                  "aufbewahrt werden")
     backup_targets.get_visible(db, user, body.target_id)  # prüft Berechtigung

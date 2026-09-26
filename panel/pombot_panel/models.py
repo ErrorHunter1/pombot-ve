@@ -19,7 +19,8 @@ class User(Base):
     discord_id: Mapped[str | None] = mapped_column(String(32), unique=True)
     avatar_url: Mapped[str | None] = mapped_column(String(255))
     password_hash: Mapped[str | None] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(16), default="user")  # admin | user
+    role: Mapped[str] = mapped_column(String(16), default="user")  # Role.key: admin | user | eigene Rollen
+    login_methods: Mapped[str] = mapped_column(String(10), default="any")  # any | password | discord
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     max_guests: Mapped[int] = mapped_column(Integer, default=2)
     max_cores: Mapped[int] = mapped_column(Integer, default=4)
@@ -35,6 +36,11 @@ class User(Base):
     @property
     def is_admin(self) -> bool:
         return self.role == "admin"
+
+    def can(self, perm: str) -> bool:
+        """Hat der Benutzer dieses Recht (über seine Rolle)? Siehe perms.py."""
+        from .perms import can
+        return can(self, perm)
 
 
 class Node(Base):
@@ -221,6 +227,43 @@ class BackupSchedule(Base):
     keep_local: Mapped[bool] = mapped_column(Boolean, default=False)  # lokale Kopie nach dem Hochladen behalten
     last_run: Mapped[datetime | None] = mapped_column(DateTime)
     last_status: Mapped[str | None] = mapped_column(String(16))
+
+
+class Role(Base):
+    """Rolle mit einzelnen Rechten (siehe perms.PERMISSIONS). admin und user sind eingebaut."""
+    __tablename__ = "roles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(16), unique=True)  # steht in User.role
+    name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str] = mapped_column(String(255), default="")
+    permissions: Mapped[str] = mapped_column(Text, default="[]")  # JSON-Liste
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class Invite(Base):
+    """Einladung: Link, mit dem sich jemand selbst ein Konto mit vorgegebener Rolle und Anmeldeart anlegt."""
+    __tablename__ = "invites"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    prefix: Mapped[str] = mapped_column(String(12))
+    email: Mapped[str | None] = mapped_column(String(255))  # nur zur Info / Vorbelegung
+    note: Mapped[str] = mapped_column(String(255), default="")
+    role: Mapped[str] = mapped_column(String(16), default="user")
+    login_methods: Mapped[str] = mapped_column(String(10), default="any")  # any | password | discord
+    quota_json: Mapped[str] = mapped_column(Text, default="{}")  # max_guests, max_cores … (leer = Standard)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    used_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+    @property
+    def quota(self) -> dict:
+        try:
+            return json.loads(self.quota_json or "{}")
+        except ValueError:
+            return {}
 
 
 class ApiToken(Base):

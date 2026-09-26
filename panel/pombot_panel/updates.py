@@ -27,7 +27,8 @@ from .agent_client import AgentClient, AgentError
 from .config import settings
 from .db import get_db, session_scope
 from .models import Node, Setting, User
-from .security import audit, client_ip, require_admin
+from .perms import require
+from .security import audit, client_ip
 
 log = logging.getLogger("pombot.updates")
 router = APIRouter(prefix="/api/admin/update", tags=["updates"])
@@ -202,7 +203,7 @@ def _panel_status() -> dict:
 
 
 @router.get("")
-def update_info(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def update_info(user: User = Depends(require("updates.manage")), db: Session = Depends(get_db)):
     latest = _get(db, "update.latest")
     checked = _get(db, "update.checked_at")
     nodes = []
@@ -223,7 +224,7 @@ def update_info(user: User = Depends(require_admin), db: Session = Depends(get_d
 
 
 @router.post("/check")
-async def update_check(user: User = Depends(require_admin)):
+async def update_check(user: User = Depends(require("updates.manage"))):
     try:
         await check_now()
     except Exception as exc:  # noqa: BLE001
@@ -242,7 +243,7 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 @router.post("/start")
-async def update_start(request: Request, body: StartBody | None = None, user: User = Depends(require_admin)):
+async def update_start(request: Request, body: StartBody | None = None, user: User = Depends(require("updates.manage"))):
     body = body or StartBody()
     with session_scope() as db:
         latest = _get(db, "update.latest")
@@ -300,7 +301,7 @@ async def update_start(request: Request, body: StartBody | None = None, user: Us
 
 
 @router.post("/nodes/{node_id}")
-async def update_node(node_id: int, request: Request, user: User = Depends(require_admin)):
+async def update_node(node_id: int, request: Request, user: User = Depends(require("updates.manage"))):
     with session_scope() as db:
         node = db.get(Node, node_id)
         if not node:

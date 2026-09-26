@@ -79,6 +79,11 @@ const discordIcon = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="t
 
 // ------------------------------------------------------------------ UI-Bausteine
 
+function can(perm) {
+  return !!(S.me && (S.me.role === "admin" || (S.me.permissions || []).includes(perm)));
+}
+const SETTINGS_PERMS = ["settings.manage", "storage.manage", "api.manage", "config.export", "updates.manage"];
+
 function brandHtml() {
   const b = (S.cfg && S.cfg.brand) || { name: "PomBot VE" };
   return b.logo ? `<img class="brand-img" src="${esc(b.logo)}" alt="">${esc(b.name)}`
@@ -296,7 +301,7 @@ function renderShell() {
   $("#menu-btn").onclick = () => $("#sidebar").classList.toggle("open");
   $("#palette-btn").onclick = () => openPalette();
   pollTasks();
-  if (me.role === "admin") { refreshUpdateBadge(); setInterval(refreshUpdateBadge, 30 * 60 * 1000); }
+  if (can("updates.manage")) { refreshUpdateBadge(); setInterval(refreshUpdateBadge, 30 * 60 * 1000); }
   $("#theme-btn").onclick = () => {
     const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
     const next = dark ? "light" : "dark";
@@ -309,10 +314,11 @@ async function updateSidebar() {
   const sb = $("#sidebar");
   if (!sb) return;
   S.lastSidebar = Date.now();
-  const admin = S.me.role === "admin";
+  const admin = can("nodes.manage");
+  const allGuests = can("guests.all");
   let guests = [], nodes = [];
   try {
-    [guests, nodes] = await Promise.all([api(`/api/guests${admin ? "?all=true" : ""}`), admin ? api("/api/nodes") : []]);
+    [guests, nodes] = await Promise.all([api(`/api/guests${allGuests ? "?all=true" : ""}`), admin ? api("/api/nodes") : []]);
   } catch (e) { return; }
   const dot = (g) => `<span class="dot-status ${g.power === "running" ? "good" : g.status === "error" || g.power === "missing" ? "bad" : ""}"></span>`;
   const gLink = (g, cls = "") => `<a href="#/guest/${g.id}" class="${cls}" data-nav="guest/${g.id}">${dot(g)}<span class="mono">${g.vmid}</span> ${esc(g.name)}</a>`;
@@ -332,15 +338,17 @@ async function updateSidebar() {
       <a href="#/tasks" data-nav="tasks">${icon("list")}Aufgaben</a>
       <a href="#/account" data-nav="account">${icon("user")}Mein Konto</a>
     </div>
-    ${admin ? `<div class="nav-section">Rechenzentrum</div>
-    <div class="nav">
-      <a href="#/nodes" data-nav="nodes">${icon("node")}Nodes<span class="count">${nodes.length}</span></a>
-      <a href="#/pools" data-nav="pools">${icon("net")}IP-Pools</a>
-      <a href="#/templates" data-nav="templates">${icon("disk")}Vorlagen</a>
-      <a href="#/users" data-nav="users">${icon("users")}Benutzer</a>
-      <a href="#/audit" data-nav="audit">${icon("shield")}Protokoll</a>
-      <a href="#/settings" data-nav="settings">${icon("gear")}Einstellungen</a>
-    </div>` : ""}
+    ${(() => {
+      const items = [
+        can("nodes.manage") && `<a href="#/nodes" data-nav="nodes">${icon("node")}Nodes<span class="count">${nodes.length}</span></a>`,
+        can("pools.manage") && `<a href="#/pools" data-nav="pools">${icon("net")}IP-Pools</a>`,
+        can("templates.manage") && `<a href="#/templates" data-nav="templates">${icon("disk")}Vorlagen</a>`,
+        can("users.manage") && `<a href="#/users" data-nav="users">${icon("users")}Benutzer</a>`,
+        can("audit.view") && `<a href="#/audit" data-nav="audit">${icon("shield")}Protokoll</a>`,
+        SETTINGS_PERMS.some(can) && `<a href="#/settings" data-nav="settings">${icon("gear")}Einstellungen</a>`,
+      ].filter(Boolean);
+      return items.length ? `<div class="nav-section">Rechenzentrum</div><div class="nav">${items.join("")}</div>` : "";
+    })()}
     <div class="nav-section">${admin ? "Ressourcenbaum" : "Meine Server"}</div>
     <div class="nav tree">${tree}</div>`;
   markActive();
@@ -384,7 +392,8 @@ const ROUTES = [
   [/^node\/(\d+)(?:\/(\w+))?$/, viewNode],
   [/^pools$/, viewPools],
   [/^pool\/(\d+)$/, viewPool],
-  [/^users$/, viewUsers],
+  [/^users(?:\/(\w+))?$/, viewUsers],
+  [/^invite\/([\w-]+)$/, viewInvite, true],
   [/^templates$/, viewTemplates],
   [/^tasks$/, viewTasks],
   [/^audit$/, viewAudit],
@@ -528,7 +537,7 @@ async function viewDashboard(params, m, silent, seq) {
         ${!my.total ? `<p class="muted">Du hast noch keinen Server. <a href="#/create">Jetzt einen erstellen</a> – IP-Adresse, Zugang und Netzwerk werden automatisch eingerichtet.</p>` : ""}
         </div></div>
       <div class="card"><div class="card-head"><h2>Mein Kontingent</h2></div><div class="card-body">
-        ${S.me.role === "admin" ? `<p class="muted" style="margin:0">Als Administrator gelten für dich keine Limits. Kontingente anderer Benutzer legst du unter <a href="#/users">Benutzer</a> fest.</p>`
+        ${can("quota.unlimited") ? `<p class="muted" style="margin:0">Für dich gelten keine Limits. Kontingente anderer Benutzer legst du unter <a href="#/users">Benutzer</a> fest.</p>`
           : quotaMeters(my.quota, my.usage)}</div></div>
     </div>
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Letzte Aufgaben</h2><a href="#/tasks" class="small">Alle</a></div>${taskRows(tasks)}</div>`);
@@ -540,7 +549,7 @@ async function viewDashboard(params, m, silent, seq) {
 function guestIPs(g) { return g.ips.map((i) => i.address).join(", ") || "DHCP"; }
 
 async function viewGuests(params, m, silent, seq) {
-  const admin = S.me.role === "admin";
+  const admin = can("guests.all");
   const guests = await api(`/api/guests${admin && S.showAll ? "?all=true" : ""}`);
   if (isStale(seq)) return;
   const filter = $("#guest-filter") ? $("#guest-filter").value : "";
@@ -657,7 +666,7 @@ async function viewGuest(params, m, silent, seq) {
   const tab = m[2] || "overview";
   const g = await api(`/api/guests/${id}`);
   if (isStale(seq)) return;
-  const admin = S.me.role === "admin";
+  const admin = can("guests.all");
   const ready = g.status === "ready";
   const running = g.power === "running";
   const base = `#/guest/${id}`;
@@ -794,7 +803,7 @@ async function guestResources(g, shell) {
   const me = await api("/api/me");
   const q = me.quota, u = me.usage;
   const own = g.owner_id === me.id;
-  const admin = me.role === "admin";
+  const admin = can("quota.unlimited");
   const maxC = admin || !own ? 64 : Math.max(g.cores, q.cores - u.cores + g.cores);
   const maxM = admin || !own ? 262144 : Math.max(g.memory_mb, q.memory_mb - u.memory_mb + g.memory_mb);
   const maxD = admin || !own ? 4096 : Math.max(g.disk_gb, q.disk_gb - u.disk_gb + g.disk_gb);
@@ -821,7 +830,8 @@ async function guestResources(g, shell) {
 }
 
 async function guestNetwork(g, shell) {
-  const admin = S.me.role === "admin";
+  const admin = can("guests.all");
+  const dnsAllowed = can("settings.manage");
   const pools = await api("/api/pools");
   const usable = (v) => pools.filter((p) => p.version === v && (!p.node_id || p.node_id === g.node_id));
   const cur4 = g.ips.find((i) => i.version === 4);
@@ -856,7 +866,7 @@ async function guestNetwork(g, shell) {
         : "Das Netzwerk im Container wird automatisch neu geschrieben – Daten bleiben erhalten."}</div>
       <button class="btn primary" data-act="netApply" ${busy ? "disabled" : ""}>Übernehmen</button>
     </div></div></div>
-    ${admin && g.ips.length ? `<div class="card" style="margin-top:16px;max-width:760px"><div class="card-head"><h2>Domain zuweisen (Cloudflare)</h2></div><div class="card-body">
+    ${dnsAllowed && g.ips.length ? `<div class="card" style="margin-top:16px;max-width:760px"><div class="card-head"><h2>Domain zuweisen (Cloudflare)</h2></div><div class="card-body">
       <p class="muted" style="margin-top:0">Legt in Cloudflare einen ${g.ips.some((i) => i.version === 6) ? "A- und AAAA-Eintrag" : "A-Eintrag"} auf ${g.ips.map((i) => `<code>${esc(i.address)}</code>`).join(", ")} an bzw. aktualisiert ihn.</p>
       <div class="row"><input type="text" id="dns-host" placeholder="web.deinedomain.de" value="${esc(g.hostname.includes(".") ? g.hostname : "")}">
         <button class="btn" style="flex:none" data-act="guestDns">Eintragen</button></div>
@@ -1416,7 +1426,7 @@ function allowsSSH(st) {
 
 async function guestFirewall(g, shell) {
   const fw = await api(`/api/guests/${g.id}/firewall`);
-  const admin = S.me.role === "admin";
+  const admin = can("guests.all");
   const st = { ...fw, rules: fw.rules.map((r) => ({ source: "", comment: "", enabled: true, ...r })) };
   const sel = (key, value, opts, i) => `<select data-rule="${i}" data-key="${key}" aria-label="${key}">${opts.map(([v, l]) => `<option value="${v}" ${v === value ? "selected" : ""}>${l}</option>`).join("")}</select>`;
   const collect = () => {
@@ -1489,7 +1499,7 @@ async function guestTasks(g, shell, seq) {
 }
 
 async function guestSettings(g, shell) {
-  const admin = S.me.role === "admin";
+  const admin = can("guests.all");
   const [templates, users, cdHtml, appList] = await Promise.all([api("/api/templates"), admin ? api("/api/users/brief") : [], cdromCard(g),
     api("/api/apps").catch(() => [])]);
   shell(`<div class="grid grid-2">
@@ -1664,19 +1674,20 @@ async function guestSettings(g, shell) {
 // ------------------------------------------------------------------ Server erstellen
 
 async function viewCreate() {
-  const admin = S.me.role === "admin";
+  const admin = can("guests.all");
+  const unlimited = can("quota.unlimited");
   const [templates, nodes, pools, me, users, storages, appList] = await Promise.all([
     api("/api/templates"), api("/api/nodes"), api("/api/pools"), api("/api/me"), admin ? api("/api/users/brief") : [],
     api("/api/storages").catch(() => []), api("/api/apps").catch(() => []),
   ]);
   const q = me.quota, u = me.usage;
-  const free = admin ? { cores: 64, memory_mb: 262144, disk_gb: 4096 }
+  const free = unlimited ? { cores: 64, memory_mb: 262144, disk_gb: 4096 }
     : { cores: q.cores - u.cores, memory_mb: q.memory_mb - u.memory_mb, disk_gb: q.disk_gb - u.disk_gb };
-  const blocked = !admin && (u.guests >= q.guests || free.cores < 1 || free.memory_mb < 256 || free.disk_gb < 2);
+  const blocked = !unlimited && (u.guests >= q.guests || free.cores < 1 || free.memory_mb < 256 || free.disk_gb < 2);
   const C = { type: "kvm", template: null, iso: null, isoList: null, name: "", hostname: "", manualHost: false, app: null };
 
   const onlineNodes = nodes.filter((n) => n.status === "online");
-  const nodeOptions = `<option value="auto">Automatisch (Node mit dem meisten freien RAM)</option>` + (admin ? onlineNodes.map((n) =>
+  const nodeOptions = `<option value="auto">Automatisch (Node mit dem meisten freien RAM)</option>` + (unlimited || can("nodes.manage") ? onlineNodes.map((n) =>
     `<option value="${n.id}">${esc(n.name)} – ${fmtMB(Math.max(0, Math.round((n.info.memory_total || 0) / 1048576) - n.committed_memory_mb))} frei</option>`).join("") : "");
   const poolOpt = (v) => pools.filter((p) => p.version === v).map((p) =>
     `<option value="${p.id}" ${p.size - p.used <= 0 ? "disabled" : ""}>${esc(p.name)}${p.network ? ` (${esc(p.network)})` : ""} – ${p.size - p.used} frei</option>`).join("");
@@ -1688,7 +1699,7 @@ async function viewCreate() {
   setMain(`
     ${pageHead("Server erstellen", "IP-Adresse, Netzwerk, Hostname und Zugang werden automatisch eingerichtet.")}
     ${blocked ? `<div class="alert warn" style="margin-bottom:16px">Dein Kontingent ist ausgeschöpft. Lösche einen Server oder wende dich an einen Administrator.</div>` : ""}
-    ${!onlineNodes.length ? `<div class="alert bad" style="margin-bottom:16px">Es ist kein Node online. ${admin ? `<a href="#/nodes">Node hinzufügen</a>` : "Bitte später erneut versuchen."}</div>` : ""}
+    ${!onlineNodes.length ? `<div class="alert bad" style="margin-bottom:16px">Es ist kein Node online. ${can("nodes.manage") ? `<a href="#/nodes">Node hinzufügen</a>` : "Bitte später erneut versuchen."}</div>` : ""}
     <form id="create-form" class="create-layout" novalidate>
       <div class="stack">
         <div class="card"><div class="card-head"><span class="step-num">1</span><h2>Typ und Betriebssystem</h2>
@@ -1711,7 +1722,7 @@ async function viewCreate() {
           ${sliderRow("cores", "CPU-Kerne", Math.min(1, Math.max(1, free.cores)), 1, Math.max(1, free.cores), 1, "Kerne")}
           ${sliderRow("memory_mb", "Arbeitsspeicher", Math.min(1024, Math.max(256, free.memory_mb)), 256, Math.max(256, free.memory_mb), 256, "MB")}
           ${sliderRow("disk_gb", "Speicher", Math.min(10, Math.max(2, free.disk_gb)), 2, Math.max(2, free.disk_gb), 1, "GB")}
-          ${admin ? "" : `<p class="muted small" style="margin:0">Noch verfügbar: ${free.cores} CPU · ${fmtMB(free.memory_mb)} · ${free.disk_gb} GB · ${q.ips - u.ips} IP-Adressen</p>`}
+          ${unlimited ? "" : `<p class="muted small" style="margin:0">Noch verfügbar: ${free.cores} CPU · ${fmtMB(free.memory_mb)} · ${free.disk_gb} GB · ${q.ips - u.ips} IP-Adressen</p>`}
         </div></div>
 
         <div class="card"><div class="card-head"><span class="step-num">3</span><h2>Standort und Netzwerk</h2></div><div class="card-body">
@@ -2453,19 +2464,35 @@ async function viewPool(params, m) {
 
 // ------------------------------------------------------------------ Benutzer
 
-async function viewUsers() {
+const LOGIN_METHODS = { any: "E-Mail/Passwort oder Discord", password: "Nur E-Mail/Passwort", discord: "Nur Discord" };
+
+async function viewUsers(params, m) {
+  const tab = m[1] || "list";
+  const tabList = [["list", "Benutzer"], ["invites", "Einladungen"], ["roles", "Rollen"]];
+  const head = (actions = "") => pageHead("Benutzer", "Konten, Einladungen und Rollen mit Rechten", actions) + tabs("#/users", tab, tabList);
+  const rolesData = await api("/api/roles");
+  const roles = rolesData.roles;
+  const assignable = roles.filter((r) => r.assignable);
+  const roleOpts = (sel) => assignable.map((r) => `<option value="${esc(r.key)}" ${r.key === sel ? "selected" : ""}>${esc(r.name)}</option>`).join("");
+  const loginOpts = (sel) => Object.entries(LOGIN_METHODS).map(([k, l]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${l}</option>`).join("");
+  const roleBadge = (key, name) => key === "admin" ? badge(name || "Administrator", "info") : key === "user" ? badge(name || "Benutzer", "plain") : badge(name || key, "warn");
+  if (tab === "roles") return usersRoles(head, rolesData);
+  if (tab === "invites") return usersInvites(head, roleOpts, loginOpts, roleBadge);
+
   const users = await api("/api/users");
   const pending = users.filter((u) => !u.active);
-  S.handlers.approve = async (ds) => { await api(`/api/users/${ds.id}`, { method: "PATCH", body: { active: true } }); toast("Benutzer freigeschaltet"); route(); };
+  S.handlers.approve = async (ds) => { await api(`/api/users/${ds.id}`, { method: "PATCH", body: { active: true } }); toast("Benutzer freigeschaltet", "good"); route(); };
   S.handlers.addUser = () => formModal({
-    title: "Lokalen Benutzer anlegen",
-    fields: `<label class="field"><span>Benutzername</span><input type="text" name="username" required></label>
+    title: "Benutzer anlegen",
+    fields: `<div class="row"><label class="field"><span>Benutzername</span><input type="text" name="username" required></label>
+        <label class="field"><span>E-Mail (optional)</span><input type="email" name="email"></label></div>
       <label class="field"><span>Passwort</span><input type="text" name="password" placeholder="Leer lassen = zufällig erzeugen"></label>
-      <label class="field"><span>Rolle</span><select name="role"><option value="user">Benutzer</option><option value="admin">Administrator</option></select></label>
-      <p class="muted small">Benutzer können sich auch einfach mit Discord anmelden – dann wird das Konto automatisch angelegt.</p>`,
+      <div class="row"><label class="field"><span>Rolle</span><select name="role">${roleOpts("user")}</select></label>
+        <label class="field"><span>Anmeldung</span><select name="login_methods">${loginOpts("any").replace('value="discord"', 'value="discord" disabled')}</select></label></div>
+      <p class="muted small" style="margin:0">Einfacher für neue Kunden: eine <a href="#/users/invites">Einladung</a> schicken – dann legen sie Benutzername und Passwort (oder Discord) selbst fest.</p>`,
     submit: "Anlegen",
     onSubmit: async (d, mm) => {
-      const r = await api("/api/users", { method: "POST", body: { ...d, password: d.password || null } });
+      const r = await api("/api/users", { method: "POST", body: { ...d, password: d.password || null, email: d.email || null } });
       mm.close();
       showSecret("Benutzer angelegt", `Passwort für <strong>${esc(d.username)}</strong>:`, r.password);
       route();
@@ -2473,11 +2500,15 @@ async function viewUsers() {
   });
   S.handlers.editUser = (ds) => {
     const u = users.find((x) => x.id === +ds.id);
+    const self = u.id === S.me.id;
     formModal({
       title: `Benutzer ${u.username}`, wide: true,
       fields: `<div class="row"><label class="field"><span>Benutzername</span><input type="text" name="username" value="${esc(u.username)}"></label>
-          <label class="field"><span>Rolle</span><select name="role"><option value="user" ${u.role === "user" ? "selected" : ""}>Benutzer</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>Administrator</option></select></label></div>
-        <label class="check"><input type="checkbox" name="active" ${u.active ? "checked" : ""}><span>Konto aktiv</span></label>
+          <label class="field"><span>Rolle</span><select name="role" ${self ? "disabled" : ""}>${assignable.some((r) => r.key === u.role) ? "" : `<option value="${esc(u.role)}" selected>${esc(u.role_name)}</option>`}${roleOpts(u.role)}</select>
+            ${self ? `<div class="hint">Die eigene Rolle kann nur ein anderer Administrator ändern.</div>` : ""}</label></div>
+        <div class="row"><label class="field"><span>Anmeldung erlaubt per</span><select name="login_methods">${loginOpts(u.login_methods)}</select>
+            <div class="hint">${u.discord ? "Discord ist verknüpft." : "Kein Discord verknüpft – „Nur Discord“ ist erst nach Verknüpfung möglich."}</div></label>
+          <label class="check" style="align-self:center"><input type="checkbox" name="active" ${u.active ? "checked" : ""} ${self ? "disabled" : ""}><span>Konto aktiv</span></label></div>
         <h3 style="margin:8px 0 12px">Kontingent</h3>
         <div class="row"><label class="field"><span>Max. Server</span><input type="number" name="max_guests" value="${u.quota.guests}" min="0"></label>
           <label class="field"><span>Max. CPU-Kerne</span><input type="number" name="max_cores" value="${u.quota.cores}" min="0"></label>
@@ -2487,10 +2518,11 @@ async function viewUsers() {
         <label class="check"><input type="checkbox" name="reset_password"><span>Neues Passwort erzeugen</span></label>
         <p class="muted small">Aktuell belegt: ${u.usage.guests} Server · ${u.usage.cores} CPU · ${fmtMB(u.usage.memory_mb)} · ${u.usage.disk_gb} GB · ${u.usage.ips} IPs</p>`,
       onSubmit: async (d, mm) => {
+        if (self) { delete d.role; delete d.active; }
         const r = await api(`/api/users/${u.id}`, { method: "PATCH", body: d });
         mm.close();
         if (r.password) showSecret("Neues Passwort", `Passwort für <strong>${esc(r.username)}</strong>:`, r.password);
-        else toast("Gespeichert");
+        else toast("Gespeichert", "good");
         route();
       },
     });
@@ -2501,22 +2533,154 @@ async function viewUsers() {
     route();
   };
   const avatar = (u) => `<span class="avatar">${u.avatar_url ? `<img src="${esc(u.avatar_url)}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}</span>`;
-  setMain(`${pageHead("Benutzer", `${plural(users.length, "Benutzer", "Benutzer")}`, `<button class="btn primary" data-act="addUser">${icon("plus")}Lokalen Benutzer anlegen</button>`)}
+  setMain(`${head(`<a class="btn" href="#/users/invites">${icon("plus")}Einladen</a><button class="btn primary" data-act="addUser">${icon("plus")}Benutzer anlegen</button>`)}
     ${pending.length ? `<div class="card" style="margin-bottom:16px;border-color:var(--warn)"><div class="card-head"><h2>Warten auf Freischaltung</h2></div><div class="table-wrap"><table><tbody>
       ${pending.map((u) => `<tr><td style="width:44px">${avatar(u)}</td><td><strong>${esc(u.username)}</strong><div class="muted small">${u.discord ? "Discord · " : ""}registriert ${fmtDate(u.created_at)}</div></td>
-        <td class="right"><button class="btn sm primary" data-act="approve" data-id="${u.id}">Freischalten</button> <button class="btn sm danger" data-act="deleteUser" data-id="${u.id}" data-name="${esc(u.username)}">Ablehnen</button></td></tr>`).join("")}
+        <td class="right">${u.manageable ? `<button class="btn sm primary" data-act="approve" data-id="${u.id}">Freischalten</button> <button class="btn sm danger" data-act="deleteUser" data-id="${u.id}" data-name="${esc(u.username)}">Ablehnen</button>` : ""}</td></tr>`).join("")}
     </tbody></table></div></div>` : ""}
-    <div class="card"><div class="table-wrap"><table><thead><tr><th></th><th>Benutzer</th><th>Rolle</th><th>Status</th><th>Anmeldung</th><th>Server</th><th>Ressourcen</th><th>Letzter Login</th><th></th></tr></thead><tbody>
-      ${users.map((u) => `<tr><td style="width:44px">${avatar(u)}</td><td><strong>${esc(u.username)}</strong>${u.email ? `<div class="muted small">${esc(u.email)}</div>` : ""}</td>
-        <td>${u.role === "admin" ? badge("Admin", "info") : badge("Benutzer", "plain")}</td>
+    <div class="card"><div class="card-head"><input type="text" id="user-filter" placeholder="Benutzer suchen …" style="max-width:320px"></div>
+      <div class="table-wrap"><table><thead><tr><th class="no-sort"></th><th>Benutzer</th><th>Rolle</th><th>Status</th><th>Anmeldung</th><th>Server</th><th>Ressourcen</th><th>Letzter Login</th><th class="no-sort"></th></tr></thead><tbody>
+      ${users.map((u) => `<tr data-search="${esc(`${u.username} ${u.email || ""} ${u.role_name}`.toLowerCase())}"><td style="width:44px">${avatar(u)}</td><td><strong>${esc(u.username)}</strong>${u.email ? `<div class="muted small">${esc(u.email)}</div>` : ""}</td>
+        <td>${roleBadge(u.role, u.role_name)}</td>
         <td>${u.active ? badge("Aktiv", "good") : badge("Gesperrt", "warn")}</td>
-        <td class="small">${[u.discord ? "Discord" : "", u.has_password ? "Passwort" : ""].filter(Boolean).join(" + ") || "–"}</td>
+        <td class="small">${[u.discord ? "Discord" : "", u.has_password ? "Passwort" : ""].filter(Boolean).join(" + ") || "–"}
+          ${u.login_methods !== "any" ? `<div class="muted">${esc(LOGIN_METHODS[u.login_methods])}</div>` : ""}</td>
         <td class="num">${u.usage.guests} / ${u.quota.guests}</td>
         <td class="small nowrap">${u.usage.cores}/${u.quota.cores} CPU · ${fmtMB(u.usage.memory_mb)}/${fmtMB(u.quota.memory_mb)}</td>
         <td class="small nowrap">${fmtDate(u.last_login)}</td>
-        <td class="right nowrap"><button class="btn sm" data-act="editUser" data-id="${u.id}">Bearbeiten</button>
-          ${u.id !== S.me.id ? `<button class="btn sm danger" data-act="deleteUser" data-id="${u.id}" data-name="${esc(u.username)}">Löschen</button>` : ""}</td></tr>`).join("")}
+        <td class="right nowrap">${u.manageable ? `<button class="btn sm" data-act="editUser" data-id="${u.id}">Bearbeiten</button>
+          ${u.id !== S.me.id ? `<button class="btn sm danger" data-act="deleteUser" data-id="${u.id}" data-name="${esc(u.username)}">Löschen</button>` : ""}` : `<span class="muted small" title="Mehr Rechte als du">geschützt</span>`}</td></tr>`).join("")}
     </tbody></table></div></div>`);
+  $("#user-filter").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    $$("tr[data-search]").forEach((tr) => tr.classList.toggle("hidden", q && !tr.dataset.search.includes(q)));
+  });
+}
+
+async function usersInvites(head, roleOpts, loginOpts, roleBadge) {
+  const invites = await api("/api/invites");
+  const state = (i) => i.used_at ? badge(`angenommen von ${i.used_by || "?"}`, "good") : i.expired ? badge("abgelaufen", "bad") : badge("offen", "info");
+  S.handlers.newInvite = () => formModal({
+    title: "Benutzer einladen", wide: true, submit: "Einladungslink erstellen",
+    fields: `<div class="row"><label class="field"><span>E-Mail (optional)</span><input type="email" name="email" placeholder="kunde@example.de"></label>
+        <label class="field"><span>Notiz (optional)</span><input type="text" name="note" maxlength="255" placeholder="z. B. Kunde Müller, Paket M"></label></div>
+      <div class="row"><label class="field"><span>Rolle</span><select name="role">${roleOpts("user")}</select></label>
+        <label class="field"><span>Registrieren mit</span><select name="login_methods">${loginOpts("any")}</select></label>
+        <label class="field"><span>Gültig</span><select name="expires_days"><option value="1">1 Tag</option><option value="7" selected>7 Tage</option><option value="30">30 Tage</option><option value="90">90 Tage</option></select></label></div>
+      <h3 style="margin:8px 0 4px;font-size:14px">Kontingent <span class="muted small">(leer = Standard aus den Einstellungen)</span></h3>
+      <div class="row"><label class="field"><span>Server</span><input type="number" name="q_max_guests" min="0"></label>
+        <label class="field"><span>CPU-Kerne</span><input type="number" name="q_max_cores" min="0"></label>
+        <label class="field"><span>RAM (MB)</span><input type="number" name="q_max_memory_mb" min="0" step="256"></label>
+        <label class="field"><span>Speicher (GB)</span><input type="number" name="q_max_disk_gb" min="0"></label>
+        <label class="field"><span>IPs</span><input type="number" name="q_max_ips" min="0"></label></div>
+      <p class="muted small" style="margin:0">Der Link gilt einmal. Wer ihn öffnet, legt sich damit selbst ein Konto an – auch wenn die freie Registrierung geschlossen ist.</p>`,
+    onSubmit: async (d, mm) => {
+      const quota = {};
+      Object.entries(d).forEach(([k, v]) => { if (k.startsWith("q_") && v !== "") quota[k.slice(2)] = +v; });
+      const r = await api("/api/invites", { method: "POST", body: { email: d.email || null, note: d.note, role: d.role,
+        login_methods: d.login_methods, expires_days: +d.expires_days, quota } });
+      mm.close();
+      showSecret("Einladung erstellt", `Diesen Link an ${r.email ? `<strong>${esc(r.email)}</strong>` : "die Person"} schicken (gilt ${r.expires_at ? `bis ${fmtDate(r.expires_at)}` : "unbegrenzt"}, einmalig):`, r.url);
+      route(true);
+    },
+  });
+  S.handlers.delInvite = async (ds) => {
+    if (!(await confirmBox("Einladung löschen?", "Der Link funktioniert danach nicht mehr.", { danger: true, ok: "Löschen" }))) return;
+    await api(`/api/invites/${ds.id}`, { method: "DELETE" });
+    route(true);
+  };
+  setMain(head(`<button class="btn primary" data-act="newInvite">${icon("plus")}Einladen</button>`) + `<div class="card">
+    ${invites.length ? `<div class="table-wrap"><table><thead><tr><th>Für</th><th>Rolle</th><th>Anmeldung</th><th>Kontingent</th><th>Status</th><th>Erstellt</th><th class="no-sort"></th></tr></thead><tbody>
+      ${invites.map((i) => `<tr><td><strong>${esc(i.email || i.note || "–")}</strong>${i.email && i.note ? `<div class="muted small">${esc(i.note)}</div>` : ""}<div class="muted small mono">${esc(i.prefix)}…</div></td>
+        <td>${roleBadge(i.role, i.role_name)}</td><td class="small">${esc(LOGIN_METHODS[i.login_methods])}</td>
+        <td class="small">${Object.keys(i.quota).length ? Object.entries(i.quota).map(([k, v]) => `${k.replace("max_", "")}: ${v}`).join(", ") : "Standard"}</td>
+        <td>${state(i)}${!i.used_at && i.expires_at ? `<div class="muted small">bis ${fmtDate(i.expires_at)}</div>` : ""}</td>
+        <td class="small">${fmtDate(i.created_at)}<div class="muted">${esc(i.created_by || "")}</div></td>
+        <td class="right">${i.used_at ? "" : `<button class="btn sm danger" data-act="delInvite" data-id="${i.id}">Löschen</button>`}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">Noch keine Einladungen. Mit „Einladen“ erzeugst du einen Link, mit dem sich jemand selbst ein Konto anlegt – mit der Rolle, Anmeldeart und dem Kontingent, das du vorgibst.</div>`}</div>`);
+}
+
+function usersRoles(head, data) {
+  const isAdmin = S.me.role === "admin";
+  const P = data.permissions;
+  const roleForm = (r) => formModal({
+    title: r ? `Rolle ${r.name}` : "Rolle anlegen", wide: true, submit: r ? "Speichern" : "Anlegen",
+    fields: `<div class="row"><label class="field"><span>Name</span><input type="text" name="name" value="${esc(r ? r.name : "")}" placeholder="z. B. Node-Verwalter" required></label>
+        <label class="field"><span>Beschreibung</span><input type="text" name="description" value="${esc(r ? r.description : "")}" maxlength="255"></label></div>
+      <h3 style="margin:8px 0 8px;font-size:14px">Rechte</h3>
+      <div class="perm-list">${Object.entries(P).map(([k, label]) => `<label class="check"><input type="checkbox" data-perm="${esc(k)}" ${r && r.permissions.includes(k) ? "checked" : ""}>
+        <span><strong class="mono small">${esc(k)}</strong><br><span class="muted small">${esc(label)}</span></span></label>`).join("")}</div>
+      <p class="muted small" style="margin:8px 0 0">Jeder Benutzer kann unabhängig davon eigene Server im Rahmen seines Kontingents verwalten.</p>`,
+    onSubmit: async (d, mm) => {
+      const permissions = $$("[data-perm]", mm).filter((c) => c.checked).map((c) => c.dataset.perm);
+      await api(r ? `/api/roles/${r.id}` : "/api/roles", { method: r ? "PUT" : "POST", body: { name: d.name, description: d.description, permissions } });
+      mm.close();
+      toast("Rolle gespeichert", "good");
+      route(true);
+    },
+  });
+  S.handlers.newRole = () => roleForm(null);
+  S.handlers.editRole = (ds) => roleForm(data.roles.find((r) => r.id === +ds.id));
+  S.handlers.delRole = async (ds) => {
+    if (!(await confirmBox("Rolle löschen?", "Nur möglich, wenn sie keinem Benutzer und keiner offenen Einladung zugewiesen ist.", { danger: true, ok: "Löschen" }))) return;
+    await api(`/api/roles/${ds.id}`, { method: "DELETE" });
+    route(true);
+  };
+  setMain(head(isAdmin ? `<button class="btn primary" data-act="newRole">${icon("plus")}Rolle anlegen</button>` : "") + `
+    ${isAdmin ? "" : `<div class="alert" style="margin-bottom:16px">Rollen anlegen und ändern können nur Administratoren.</div>`}
+    <div class="role-grid">${data.roles.map((r) => `<div class="card"><div class="card-head"><h2>${esc(r.name)}</h2>${r.builtin ? badge("eingebaut", "plain") : ""}
+        <span class="muted small">${plural(r.users, "Benutzer", "Benutzer")}</span></div><div class="card-body">
+        ${r.description ? `<p class="muted small" style="margin-top:0">${esc(r.description)}</p>` : ""}
+        ${r.key === "admin" ? `<p class="small" style="margin:0">Alle Rechte, auch Rollen verwalten.</p>`
+          : r.permissions.length ? `<div class="perm-tags">${r.permissions.map((p) => `<span class="tag" title="${esc(P[p] || "")}">${esc(p)}</span>`).join("")}</div>`
+          : `<p class="muted small" style="margin:0">Keine zusätzlichen Rechte – nur eigene Server im Rahmen des Kontingents.</p>`}
+        ${isAdmin && !r.builtin ? `<div class="row" style="gap:8px;margin-top:12px"><button class="btn sm" data-act="editRole" data-id="${r.id}">Bearbeiten</button>
+          <button class="btn sm danger" data-act="delRole" data-id="${r.id}" ${r.users ? "disabled" : ""}>Löschen</button></div>` : ""}
+      </div></div>`).join("")}</div>
+    <div class="card" style="margin-top:16px"><div class="card-head"><h2>Alle Rechte</h2></div><div class="table-wrap"><table><tbody>
+      ${Object.entries(P).map(([k, label]) => `<tr><td class="mono small nowrap">${esc(k)}</td><td class="small">${esc(label)}</td></tr>`).join("")}</tbody></table></div></div>`);
+}
+
+async function viewInvite(params, m) {
+  const token = m[1];
+  let inv;
+  try { inv = await api(`/api/invites/public/${encodeURIComponent(token)}`); } catch (e) {
+    $("#root").innerHTML = `<div class="login-page"><div class="login-card"><div class="brand">${brandHtml()}</div>
+      <div class="card"><div class="card-body" style="padding:24px"><h2 style="margin-top:0">Einladung ungültig</h2><p class="muted">${esc(e.message)}</p>
+      <a class="btn block" href="#/login">Zur Anmeldung</a></div></div></div></div>`;
+    return;
+  }
+  if (inv.brand) S.cfg = { ...(S.cfg || {}), brand: inv.brand };
+  $("#root").innerHTML = `<div class="login-page"><div class="login-card">
+    <div class="brand">${brandHtml()}</div>
+    <div class="card"><div class="card-body" style="padding:24px">
+      <h2 style="margin:0 0 4px">Du wurdest eingeladen</h2>
+      <p class="muted" style="margin-top:0">Lege dein Konto an – Rolle: <strong>${esc(inv.role_name)}</strong>${inv.expires_at ? ` · Link gültig bis ${fmtDate(inv.expires_at)}` : ""}</p>
+      ${inv.discord ? `<a class="btn discord lg block" href="/api/auth/discord/login?invite=${encodeURIComponent(token)}">${discordIcon} Mit Discord registrieren</a>${inv.password ? `<div class="divider">oder mit Passwort</div>` : ""}` : ""}
+      ${inv.password ? `<form id="invite-form">
+        <label class="field"><span>Benutzername</span><input type="text" name="username" autocomplete="username" minlength="2" maxlength="40" required></label>
+        <label class="field"><span>E-Mail</span><input type="email" name="email" value="${esc(inv.email || "")}" autocomplete="email"></label>
+        <label class="field"><span>Passwort (mind. 10 Zeichen)</span><input type="password" name="password" autocomplete="new-password" minlength="10" required></label>
+        <label class="field"><span>Passwort wiederholen</span><input type="password" name="password2" autocomplete="new-password" minlength="10" required></label>
+        <div class="alert bad hidden" id="invite-error" style="margin-bottom:12px"></div>
+        <button class="btn primary block lg" type="submit">Konto anlegen</button></form>` : ""}
+      ${!inv.discord && !inv.password ? `<div class="alert warn">Diese Einladung gilt nur für Discord, der Discord-Login ist aber nicht eingerichtet. Bitte an den Administrator wenden.</div>` : ""}
+    </div></div></div></div>`;
+  const f = $("#invite-form");
+  if (f) f.onsubmit = async (e) => {
+    e.preventDefault();
+    const err = $("#invite-error");
+    err.classList.add("hidden");
+    if (f.password.value !== f.password2.value) { err.textContent = "Die Passwörter stimmen nicht überein."; err.classList.remove("hidden"); return; }
+    try {
+      await api(`/api/invites/public/${encodeURIComponent(token)}/accept`, { method: "POST",
+        body: { username: f.username.value.trim(), password: f.password.value, email: f.email.value.trim() || null } });
+      S.me = await api("/api/me");
+      $("#root").innerHTML = "";
+      location.hash = "#/dashboard";
+      toast("Willkommen! Dein Konto ist angelegt.", "good");
+    } catch (e2) { err.textContent = e2.message; err.classList.remove("hidden"); }
+  };
 }
 
 // ------------------------------------------------------------------ Vorlagen
@@ -2580,10 +2744,14 @@ async function viewTemplates() {
 // ------------------------------------------------------------------ Adminbereich: Einstellungen
 
 async function viewSettings(params, m, silent, seq) {
-  const tab = m[1] || "general";
+  const TAB_PERM = { general: "settings.manage", discord: "settings.manage", cloudflare: "settings.manage", domain: "settings.manage",
+    branding: "settings.manage", backups: "storage.manage", storage: "storage.manage", api: "api.manage", export: "config.export", update: "updates.manage" };
+  const allowedTabs = ([["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["api", "REST-API"], ["export", "Export"], ["update", "Updates"]]).filter(([k]) => can(TAB_PERM[k] || "settings.manage"));
+  if (!allowedTabs.length) { setMain(`<div class="alert bad">Keine Berechtigung für die Einstellungen.</div>`); return; }
+  const tab = allowedTabs.some(([k]) => k === (m[1] || "general")) ? (m[1] || "general") : allowedTabs[0][0];
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["api", "REST-API"], ["export", "Export"], ["update", "Updates"]]);
+    + tabs(base, tab, allowedTabs);
   if (tab === "cloudflare") return settingsCloudflare(head);
   if (tab === "update") return settingsUpdate(head, silent, seq);
   if (tab === "branding") return settingsBranding(head);
@@ -2796,7 +2964,7 @@ async function viewAccount(params) {
     <div class="grid grid-2">
       <div class="stack">
         <div class="card"><div class="card-head"><h2>Profil</h2></div><div class="card-body"><dl class="kv">
-          <dt>Benutzername</dt><dd>${esc(me.username)}</dd><dt>Rolle</dt><dd>${me.role === "admin" ? "Administrator" : "Benutzer"}</dd>
+          <dt>Benutzername</dt><dd>${esc(me.username)}</dd><dt>Rolle</dt><dd>${esc(me.role_name || me.role)}</dd>
           <dt>E-Mail</dt><dd>${esc(me.email || "–")}</dd><dt>Mitglied seit</dt><dd>${fmtDate(me.created_at)}</dd>
           <dt>Discord</dt><dd>${me.discord ? `${badge("Verknüpft", "good")} <button class="btn sm" data-act="unlink">Trennen</button>`
             : me.discord_enabled ? `<a class="btn sm discord" href="/api/auth/discord/link">${discordIcon} Discord verknüpfen</a>` : `<span class="muted">nicht eingerichtet</span>`}</dd>
@@ -2968,7 +3136,7 @@ function schemaFields(schema, spec) {
 }
 
 async function viewApiDocs(params) {
-  if (S.me.role !== "admin") { setMain(`<div class="alert bad">Die API-Dokumentation ist nur für Administratoren.</div>`); return; }
+  if (!can("api.manage")) { setMain(`<div class="alert bad">Für die API-Dokumentation fehlt dir das Recht „api.manage“.</div>`); return; }
   const [spec, st] = await Promise.all([api("/api/admin/api/openapi.json"), api("/api/admin/api")]);
   const ops = [];
   Object.entries(spec.paths).forEach(([path, item]) => HTTP_METHODS.forEach((m) => {
@@ -3142,25 +3310,26 @@ function applySort(table, head, key) {
 
 // ---- Befehlspalette
 const PAGES = [
-  ["Dashboard", "#/dashboard", "home", false], ["Server", "#/guests", "server", false], ["Server erstellen", "#/create", "plus", false],
-  ["Nodes", "#/nodes", "node", true], ["IP-Pools", "#/pools", "net", true], ["Benutzer", "#/users", "users", true],
-  ["Vorlagen", "#/templates", "disk", true], ["Aufgaben", "#/tasks", "list", false], ["Audit-Protokoll", "#/audit", "shield", true],
-  ["Einstellungen", "#/settings", "gear", true], ["Einstellungen: Branding & SEO", "#/settings/branding", "gear", true],
-  ["Einstellungen: Updates", "#/settings/update", "download", true], ["Einstellungen: Backup-Speicher", "#/settings/backups", "gear", true],
-  ["Einstellungen: Gemeinsamer Speicher", "#/settings/storage", "disk", true],
-  ["REST-API: Dokumentation", "#/api-docs", "list", true], ["Konfiguration exportieren", "#/settings/export", "download", true], ["REST-API: Tokens & Einstellungen", "#/settings/api", "gear", true], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", true],
-  ["Mein Konto", "#/account", "user", false],
+  ["Dashboard", "#/dashboard", "home", ""], ["Server", "#/guests", "server", ""], ["Server erstellen", "#/create", "plus", ""],
+  ["Nodes", "#/nodes", "node", "nodes.manage"], ["IP-Pools", "#/pools", "net", "pools.manage"], ["Benutzer", "#/users", "users", "users.manage"],
+  ["Vorlagen", "#/templates", "disk", "templates.manage"], ["Aufgaben", "#/tasks", "list", ""], ["Audit-Protokoll", "#/audit", "shield", "audit.view"],
+  ["Einstellungen", "#/settings", "gear", "settings.manage"], ["Einstellungen: Branding & SEO", "#/settings/branding", "gear", "settings.manage"],
+  ["Einstellungen: Updates", "#/settings/update", "download", "updates.manage"], ["Einstellungen: Backup-Speicher", "#/settings/backups", "gear", "storage.manage"],
+  ["Einstellungen: Gemeinsamer Speicher", "#/settings/storage", "disk", "storage.manage"],
+  ["REST-API: Dokumentation", "#/api-docs", "list", "api.manage"], ["Konfiguration exportieren", "#/settings/export", "download", "config.export"], ["REST-API: Tokens & Einstellungen", "#/settings/api", "gear", "api.manage"], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", "settings.manage"],
+  ["Mein Konto", "#/account", "user", ""], ["Benutzer einladen", "#/users/invites", "users", "users.manage"], ["Rollen & Rechte", "#/users/roles", "shield", "users.manage"],
 ];
 let paletteCache = { t: 0, items: [] };
 
 async function paletteItems() {
-  const admin = S.me && S.me.role === "admin";
-  const items = PAGES.filter(([, , , adm]) => admin || !adm).map(([label, href, ic]) => ({ label, sub: "Seite", href, icon: ic }));
+  const admin = can("nodes.manage");
+  const allGuests = can("guests.all");
+  const items = PAGES.filter(([, , , perm]) => !perm || can(perm)).map(([label, href, ic]) => ({ label, sub: "Seite", href, icon: ic }));
   items.push({ label: "Hell/Dunkel umschalten", sub: "Aktion", icon: "moon", run: () => $("#theme-btn") && $("#theme-btn").click() });
   items.push({ label: "Tastenkürzel anzeigen", sub: "Hilfe", icon: "list", run: showShortcuts });
   items.push({ label: "Abmelden", sub: "Aktion", icon: "logout", run: () => $("#logout-btn") && $("#logout-btn").click() });
   if (Date.now() - paletteCache.t > 30000) {
-    const [guests, nodes] = await Promise.all([api(`/api/guests${admin ? "?all=true" : ""}`).catch(() => []), admin ? api("/api/nodes").catch(() => []) : []]);
+    const [guests, nodes] = await Promise.all([api(`/api/guests${allGuests ? "?all=true" : ""}`).catch(() => []), admin ? api("/api/nodes").catch(() => []) : []]);
     paletteCache = {
       t: Date.now(),
       items: [
@@ -3233,10 +3402,10 @@ document.addEventListener("keydown", (e) => {
   const t = e.target;
   if (t && (/INPUT|TEXTAREA|SELECT/.test(t.tagName) || t.isContentEditable)) return;
   if ($(".modal-back") || $(".palette-back")) return;
-  const admin = S.me.role === "admin";
   if (Date.now() - pendingG < 1200) {
     pendingG = 0;
-    const target = { d: "#/dashboard", s: "#/guests", n: admin && "#/nodes", t: "#/tasks", e: admin && "#/settings", a: "#/account", p: admin && "#/pools", u: admin && "#/users" }[e.key];
+    const target = { d: "#/dashboard", s: "#/guests", n: can("nodes.manage") && "#/nodes", t: "#/tasks", e: SETTINGS_PERMS.some(can) && "#/settings",
+      a: "#/account", p: can("pools.manage") && "#/pools", u: can("users.manage") && "#/users" }[e.key];
     if (target) { e.preventDefault(); location.hash = target; }
     return;
   }

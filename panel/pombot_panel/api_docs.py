@@ -39,6 +39,10 @@ SUMMARY = {
     "unlink_discord": "Discord-Verknüpfung lösen", "list_users": "Benutzer auflisten", "create_user": "Benutzer anlegen",
     "list_users_brief": "Benutzer (Kurzliste)", "update_user": "Benutzer ändern (Rolle, Kontingent, Sperre, Passwort)",
     "delete_user": "Benutzer löschen",
+    "list_roles": "Rollen und verfügbare Rechte", "create_role": "Rolle anlegen (nur Admin)", "update_role": "Rolle ändern (nur Admin)",
+    "delete_role": "Rolle löschen (nur Admin)", "list_invites": "Einladungen auflisten", "create_invite": "Einladung erstellen",
+    "delete_invite": "Einladung löschen", "invite_info": "Einladung ansehen (öffentlich, mit Link-Token)",
+    "invite_accept": "Einladung annehmen und Konto anlegen (öffentlich)",
     # System
     "list_templates": "Vorlagen auflisten", "create_template": "Vorlage anlegen", "update_template": "Vorlage ändern",
     "delete_template": "Vorlage löschen", "list_tasks": "Aufgaben auflisten", "get_task": "Aufgabe mit Log abrufen",

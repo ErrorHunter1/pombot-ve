@@ -40,6 +40,8 @@ def login(body: LoginBody, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(401, "Benutzername oder Passwort falsch")
     if not user.active:
         raise HTTPException(403, "Konto ist deaktiviert oder wartet auf Freischaltung")
+    if user.login_methods == "discord":
+        raise HTTPException(403, "Dieses Konto meldet sich nur mit Discord an")
     request.session.clear()
     request.session["uid"] = user.id
     user.last_login = now()
@@ -67,7 +69,10 @@ def _discord_redirect(request: Request, link: bool) -> RedirectResponse:
 
 
 @router.get("/discord/login")
-def discord_login(request: Request):
+def discord_login(request: Request, invite: str = ""):
+    request.session.pop("discord_invite", None)
+    if invite:  # Registrierung über eine Einladung
+        request.session["discord_invite"] = invite[:64]
     return _discord_redirect(request, link=False)
 
 
@@ -85,6 +90,7 @@ def discord_callback(request: Request, code: str = "", state: str = "", error: s
                      db: Session = Depends(get_db)):
     expected = request.session.pop("discord_state", None)
     link = request.session.pop("discord_link", False)
+    invite_token = request.session.pop("discord_invite", None)
     if error:
         return _fail("Discord-Anmeldung abgebrochen")
     if not expected or not secrets.compare_digest(expected, state) or not code:
@@ -126,7 +132,21 @@ def discord_callback(request: Request, code: str = "", state: str = "", error: s
         return RedirectResponse("/#/account")
 
     user = db.scalar(select(User).where(User.discord_id == discord_id))
-    if not user:
+    if invite_token:
+        from ..invites import find_open, new_user_from, unique_name
+        if user:
+            return _fail("Dieses Discord-Konto hat bereits ein Konto – bitte einfach anmelden")
+        try:
+            inv = find_open(db, invite_token)
+        except HTTPException as exc:
+            return _fail(str(exc.detail))
+        if inv.login_methods == "password":
+            return _fail("Diese Einladung gilt nur für E-Mail/Passwort")
+        base = (profile.get("global_name") or profile.get("username") or "user").strip()
+        user = new_user_from(db, inv, unique_name(db, base), discord_id=discord_id, email=profile.get("email") or inv.email,
+                             avatar_url=avatar)
+        audit(db, user, "register", f"Einladung {inv.prefix} per Discord (Rolle {inv.role})", ip)
+    elif not user:
         if settings.registration == "closed":
             return _fail("Registrierung ist geschlossen – bitte an einen Administrator wenden")
         first_user = not db.scalar(select(func.count(User.id)))
@@ -146,6 +166,8 @@ def discord_callback(request: Request, code: str = "", state: str = "", error: s
         db.flush()
         audit(db, user, "register", f"Discord {discord_id}", ip)
     else:
+        if user.login_methods == "password":
+            return _fail("Dieses Konto meldet sich nur mit E-Mail/Passwort an")
         user.avatar_url = avatar
         if discord_id in settings.discord_admin_ids and user.role != "admin":
             user.role = "admin"

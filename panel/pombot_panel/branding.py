@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import SessionLocal, get_db
 from .models import Setting, User
-from .security import audit, client_ip, require_admin
+from .perms import require
+from .security import audit, client_ip
 
 DIR = Path(settings.data_dir) / "branding"
 KINDS = {"favicon": "Tab-Icon", "logo": "Logo", "og": "Vorschaubild"}
@@ -155,12 +156,12 @@ def _view() -> dict:
 
 
 @router.get("/api/admin/branding")
-def branding_get(user: User = Depends(require_admin)):
+def branding_get(user: User = Depends(require("settings.manage"))):
     return _view()
 
 
 @router.put("/api/admin/branding")
-def branding_put(body: BrandingBody, request: Request, user: User = Depends(require_admin),
+def branding_put(body: BrandingBody, request: Request, user: User = Depends(require("settings.manage")),
                  db: Session = Depends(get_db)):
     data = {**get(), **body.model_dump()}
     _save(db, data)
@@ -171,7 +172,7 @@ def branding_put(body: BrandingBody, request: Request, user: User = Depends(requ
 
 
 @router.put("/api/admin/branding/{kind}")
-async def branding_upload(kind: str, request: Request, user: User = Depends(require_admin),
+async def branding_upload(kind: str, request: Request, user: User = Depends(require("settings.manage")),
                           db: Session = Depends(get_db)):
     """Bild hochladen: Rohdaten im Body, Typ im Content-Type-Header."""
     if kind not in KINDS:
@@ -198,7 +199,7 @@ async def branding_upload(kind: str, request: Request, user: User = Depends(requ
 
 
 @router.delete("/api/admin/branding/{kind}")
-def branding_delete(kind: str, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def branding_delete(kind: str, request: Request, user: User = Depends(require("settings.manage")), db: Session = Depends(get_db)):
     if kind not in KINDS:
         raise HTTPException(404)
     for old in DIR.glob(f"{kind}.*"):
