@@ -59,6 +59,7 @@ SUMMARY = {
     "cf_create": "DNS-Eintrag anlegen", "cf_update": "DNS-Eintrag ändern", "cf_delete": "DNS-Eintrag löschen",
     "guest_dns": "DNS-Einträge für einen Server setzen", "get_domain": "Domain & HTTPS abrufen",
     "set_domain": "Domain mit Zertifikat einrichten", "reset_domain": "Domain entfernen (zurück zur IP)",
+    "export_config": "Konfiguration exportieren (JSON)", "export_sections": "Exportierbare Bereiche",
 }
 
 NOTES = {

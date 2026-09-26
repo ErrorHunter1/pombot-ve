@@ -206,6 +206,10 @@ Bestehende Konten können Discord unter **Mein Konto** verknüpfen.
   Ablaufdatum; gespeichert wird nur ein Hash. Umfasst alles, was die Oberfläche kann (Server erstellen, steuern,
   Backups, Nodes, IP-Pools …). Die **Dokumentation** mit allen Endpunkten, Parametern, curl-Beispielen und
   „Ausprobieren“ gibt es im Panel unter REST-API → Dokumentation (nur für angemeldete Admins).
+- **Konfiguration exportieren** (Einstellungen → Export): Einstellungen, Branding, Nodes, IP-Pools mit
+  Adressen, Vorlagen, Benutzer, Server (mit Firewall und Backup-Zeitplan), Speicher, Backup-Ziele und API-Tokens
+  als JSON-Datei – Bereiche wählbar. Geheimnisse (Passwort-Hashes, Node-Tokens, Zugangsdaten) nur auf Wunsch und
+  nur mit Anmeldung im Panel; per REST-API: `GET /api/admin/export?sections=nodes,pools`.
 - **Branding & SEO:** Name, Seitentitel, Meta-Beschreibung, Schlüsselwörter, Indexierung durch Suchmaschinen
   an/aus (`robots.txt`, `noindex`), Tab-Icon, Logo und Vorschaubild für geteilte Links
   (Einstellungen → Branding & SEO).

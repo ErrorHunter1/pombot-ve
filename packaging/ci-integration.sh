@@ -404,6 +404,15 @@ api PUT /api/admin/api '{"enabled":false}' >/dev/null
 tapi "$RW" GET /api/me | grep -q "deaktiviert" || fail "Ausgeschaltete API akzeptiert Tokens"
 end
 
+step "Konfiguration exportieren"
+api GET /api/admin/export > /tmp/export.json
+json 'sorted(k for k in d if k in ("settings","nodes","pools","templates","users","guests"))' < /tmp/export.json
+json 'd["nodes"][0]["name"]' < /tmp/export.json | grep -q ci-node || fail "Node fehlt im Export"
+grep -q '"token"' /tmp/export.json && grep -q "$(sudo grep '^POMBOT_AGENT_TOKEN=' /etc/pombot/agent.env | cut -d= -f2-)" /tmp/export.json && fail "Node-Token im Export ohne Geheimnisse"
+grep -q 'scrypt\$' /tmp/export.json && fail "Passwort-Hash im Export ohne Geheimnisse"
+api GET "/api/admin/export?secrets=true" | grep -q 'scrypt\$' || fail "Export mit Geheimnissen unvollständig"
+end
+
 step "Branding & SEO"
 curl -sk "$API/robots.txt" | grep -q "Disallow: /" || fail "robots.txt sperrt nicht"
 api PUT /api/admin/branding '{"name":"CI Cloud","title":"CI Cloud Panel","description":"Test","keywords":"","indexing":false,"theme_color":"#224466"}' >/dev/null

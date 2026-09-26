@@ -510,3 +510,6 @@ body, .card, .sidebar, .topbar { transition: background-color .25s ease, border-
 .api-result.ok { border-color: color-mix(in srgb, var(--good) 50%, var(--border)); }
 .api-result.bad { border-color: color-mix(in srgb, var(--bad) 50%, var(--border)); }
 @media (max-width: 900px) { .api-layout { grid-template-columns: 1fr; } .api-nav { position: static; max-height: none; } .api-sum { display: none; } }
+
+/* Export */
+.export-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 16px; }

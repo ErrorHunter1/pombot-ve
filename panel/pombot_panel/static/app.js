@@ -2583,11 +2583,12 @@ async function viewSettings(params, m, silent, seq) {
   const tab = m[1] || "general";
   const base = "#/settings";
   const head = pageHead("Einstellungen", "Adminbereich – Panel, Anmeldung, Cloudflare und Domain")
-    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["api", "REST-API"], ["update", "Updates"]]);
+    + tabs(base, tab, [["general", "Allgemein"], ["discord", "Discord-Login"], ["backups", "Backup-Speicher"], ["storage", "Gemeinsamer Speicher"], ["cloudflare", "Cloudflare-DNS"], ["domain", "Domain & HTTPS"], ["branding", "Branding & SEO"], ["api", "REST-API"], ["export", "Export"], ["update", "Updates"]]);
   if (tab === "cloudflare") return settingsCloudflare(head);
   if (tab === "update") return settingsUpdate(head, silent, seq);
   if (tab === "branding") return settingsBranding(head);
   if (tab === "api") return settingsApi(head);
+  if (tab === "export") return settingsExport(head);
   if (tab === "backups") return settingsBackupTargets(head);
   if (tab === "storage") return settingsStorages(head);
   if (tab === "domain") return settingsDomain(head);
@@ -2822,6 +2823,53 @@ async function viewAccount(params) {
   $("#keys-form").onsubmit = async (e) => {
     e.preventDefault();
     await api("/api/me", { method: "PATCH", body: { ssh_keys: e.target.ssh_keys.value } }).then(() => toast("Gespeichert")).catch(fail);
+  };
+}
+
+// ------------------------------------------------------------------ Export (Einstellungen)
+
+async function settingsExport(head) {
+  const sections = await api("/api/admin/export/sections");
+  S.handlers.exportAll = (ds) => { $$("#export-form [data-sec]").forEach((c) => { c.checked = ds.on === "1"; }); };
+  setMain(head + `<div class="grid grid-2">
+    <div class="card"><div class="card-head"><h2>Konfiguration exportieren</h2></div><div class="card-body">
+      <p class="muted" style="margin-top:0">Lädt die Konfiguration des Panels als JSON-Datei herunter – zum Archivieren, Vergleichen, Dokumentieren oder als Grundlage für eine neue Installation.
+        Server-Daten (Festplatten) sind nicht enthalten – dafür gibt es Backups.</p>
+      <form id="export-form">
+        <div class="row" style="gap:8px;margin-bottom:8px"><button type="button" class="btn sm" data-act="exportAll" data-on="1">Alle</button><button type="button" class="btn sm" data-act="exportAll" data-on="0">Keine</button></div>
+        <div class="export-grid">${Object.entries(sections).map(([k, label]) => `<label class="check"><input type="checkbox" data-sec="${esc(k)}" checked><span>${esc(label)}</span></label>`).join("")}</div>
+        <label class="check" style="margin-top:14px"><input type="checkbox" id="export-secrets"><span><strong>Geheimnisse einschließen</strong><br>
+          <span class="muted small">Passwort-Hashes, Node-Tokens und -Zertifikate, Zugangsdaten von Speichern, Discord-Secret, Cloudflare-Token. Die Datei dann wie ein Passwort behandeln.
+          Token der REST-API selbst werden nie exportiert.</span></span></label>
+        <div class="row" style="gap:10px;align-items:center;margin-top:14px"><button class="btn primary" type="submit" id="export-go">${icon("download")}Exportieren</button><span class="muted small" id="export-info"></span></div>
+      </form></div></div>
+    <div class="card"><div class="card-head"><h2>Per REST-API</h2></div><div class="card-body">
+      <p class="muted" style="margin-top:0">Der Export ist auch per API abrufbar (ohne Geheimnisse), z. B. für eine tägliche Sicherung per Cronjob:</p>
+      <div class="api-code"><pre>${esc(`curl -H "Authorization: Bearer $POMBOT_TOKEN" \\\n  "${location.origin}/api/admin/export?sections=nodes,pools,guests" \\\n  -o pombot-export.json`)}</pre></div>
+      <p class="muted small">Bereiche: ${Object.keys(sections).map((k) => `<code>${esc(k)}</code>`).join(" ")} – ohne <code>sections</code> wird alles exportiert.</p>
+    </div></div></div>`);
+  $("#export-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const chosen = $$("#export-form [data-sec]").filter((c) => c.checked).map((c) => c.dataset.sec);
+    if (!chosen.length) return toast("Bitte mindestens einen Bereich wählen", "bad");
+    const secrets = $("#export-secrets").checked;
+    if (secrets && !(await confirmBox("Mit Geheimnissen exportieren?", "Die Datei enthält dann Zugangsdaten, mit denen man die Nodes steuern kann. Sicher aufbewahren und nicht weitergeben.", { ok: "Exportieren" }))) return;
+    const btn = $("#export-go");
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/admin/export?sections=${chosen.join(",")}&secrets=${secrets}`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Fehler ${res.status}`);
+      const blob = await res.blob();
+      const name = (res.headers.get("content-disposition") || "").match(/filename="([^"]+)"/);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name ? name[1] : "pombot-export.json";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      $("#export-info").textContent = `${a.download} · ${fmtBytes(blob.size)}`;
+      toast("Export heruntergeladen", "good");
+    } catch (err) { fail(err); } finally { btn.disabled = false; }
   };
 }
 
@@ -3100,7 +3148,7 @@ const PAGES = [
   ["Einstellungen", "#/settings", "gear", true], ["Einstellungen: Branding & SEO", "#/settings/branding", "gear", true],
   ["Einstellungen: Updates", "#/settings/update", "download", true], ["Einstellungen: Backup-Speicher", "#/settings/backups", "gear", true],
   ["Einstellungen: Gemeinsamer Speicher", "#/settings/storage", "disk", true],
-  ["REST-API: Dokumentation", "#/api-docs", "list", true], ["REST-API: Tokens & Einstellungen", "#/settings/api", "gear", true], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", true],
+  ["REST-API: Dokumentation", "#/api-docs", "list", true], ["Konfiguration exportieren", "#/settings/export", "download", true], ["REST-API: Tokens & Einstellungen", "#/settings/api", "gear", true], ["Einstellungen: Domain & HTTPS", "#/settings/domain", "gear", true],
   ["Mein Konto", "#/account", "user", false],
 ];
 let paletteCache = { t: 0, items: [] };
