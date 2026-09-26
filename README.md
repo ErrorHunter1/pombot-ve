@@ -23,6 +23,8 @@ Läuft auf **Debian 12/13** und **Ubuntu 22.04/24.04**.
 | `install.sh` | Installer aus dem Quellcode (Panel, optional gleich mit Agent) |
 | `agent/install-agent.sh` | Installer für einen Node (wird vom Panel automatisch per SSH ausgeführt) |
 
+### DEMO https://demo.errorhunter.it
+
 ## Installation (One-Click)
 
 Auf einem frischen Server mit **Debian 12/13** oder **Ubuntu 22.04/24.04** als root ausführen:
